@@ -14,7 +14,7 @@ export function useAudioPlayer() {
     // Cria elemento de áudio no contexto de interação do usuário
     if (!audioRef.current) {
       const audio = new Audio();
-      audio.playsInline = true;
+      (audio as any).playsInline = true;
       audio.setAttribute('playsinline', '');
       audioRef.current = audio;
     }
