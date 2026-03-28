@@ -1,0 +1,216 @@
+import { WebSocketServer } from 'ws';
+import { processAudioPipeline } from '../services/pipeline.js';
+import {
+  createSession,
+  endSession,
+  joinSessionDB,
+  leaveSessionDB,
+  validateToken,
+} from '../services/supabase.js';
+
+// Sessões ativas em memória (para streaming de áudio em tempo real)
+// Map<sessionId, { professorWs, professorId, professorName, subject, language, listeners: Map<ws, { studentId, targetLang }> }>
+const activeSessions = new Map();
+global.activeSessions = activeSessions;
+
+export function setupWebSocket(server) {
+  const wss = new WebSocketServer({ server, path: '/ws' });
+
+  wss.on('connection', (ws) => {
+    let role = null;
+    let sessionId = null;
+    let userId = null;
+
+    ws.on('message', async (data) => {
+      try {
+        const msg = tryParseJSON(data);
+
+        if (msg) {
+          // Autenticação no primeiro comando
+          if (msg.token && !userId) {
+            const user = await validateToken(msg.token);
+            if (!user) {
+              ws.send(JSON.stringify({ type: 'error', message: 'Token inválido' }));
+              ws.close();
+              return;
+            }
+            userId = user.id;
+          }
+
+          await handleControlMessage(ws, msg, userId, (r, s) => {
+            role = r;
+            sessionId = s;
+          });
+        } else if (role === 'professor' && sessionId) {
+          await handleAudioData(sessionId, data);
+        }
+      } catch (err) {
+        console.error('WebSocket message error:', err.message);
+        ws.send(JSON.stringify({ type: 'error', message: err.message }));
+      }
+    });
+
+    ws.on('close', async () => {
+      try {
+        if (role === 'professor' && sessionId) {
+          const session = activeSessions.get(sessionId);
+          if (session) {
+            for (const [listener] of session.listeners) {
+              listener.send(JSON.stringify({ type: 'session_ended' }));
+            }
+            activeSessions.delete(sessionId);
+            await endSession(sessionId);
+            console.log(`Session ${sessionId} ended`);
+          }
+        } else if (role === 'student' && sessionId) {
+          const session = activeSessions.get(sessionId);
+          if (session) {
+            session.listeners.delete(ws);
+            if (userId) await leaveSessionDB(sessionId, userId);
+          }
+        }
+      } catch (err) {
+        console.error('Close handler error:', err.message);
+      }
+    });
+  });
+
+  console.log('WebSocket server ready');
+}
+
+async function handleControlMessage(ws, msg, userId, setRole) {
+  switch (msg.type) {
+    case 'professor_start': {
+      const professorId = userId || msg.professorId;
+      if (!professorId) {
+        ws.send(JSON.stringify({ type: 'error', message: 'Autenticação necessária' }));
+        return;
+      }
+
+      // Persiste no Supabase
+      const dbSession = await createSession(
+        professorId,
+        msg.subject || 'Aula',
+        msg.language || 'pt'
+      );
+
+      const sessionId = dbSession.id;
+      activeSessions.set(sessionId, {
+        professorWs: ws,
+        professorId,
+        professorName: msg.professorName || 'Professor',
+        subject: dbSession.subject,
+        language: dbSession.language,
+        listeners: new Map(),
+      });
+
+      setRole('professor', sessionId);
+      ws.send(JSON.stringify({ type: 'session_created', sessionId }));
+      console.log(`Session ${sessionId} created by ${msg.professorName}`);
+      break;
+    }
+
+    case 'professor_stop': {
+      const sid = msg.sessionId;
+      if (sid && activeSessions.has(sid)) {
+        const session = activeSessions.get(sid);
+        for (const [listener] of session.listeners) {
+          listener.send(JSON.stringify({ type: 'session_ended' }));
+        }
+        activeSessions.delete(sid);
+        await endSession(sid);
+        ws.send(JSON.stringify({ type: 'session_stopped' }));
+      }
+      break;
+    }
+
+    case 'student_join': {
+      const session = activeSessions.get(msg.sessionId);
+      if (!session) {
+        ws.send(JSON.stringify({ type: 'error', message: 'Sessão não encontrada' }));
+        return;
+      }
+
+      const studentId = userId || msg.studentId;
+      const targetLang = msg.language || 'en';
+
+      session.listeners.set(ws, { studentId, targetLang });
+      setRole('student', msg.sessionId);
+
+      // Persiste participação
+      if (studentId) {
+        await joinSessionDB(msg.sessionId, studentId, targetLang);
+      }
+
+      ws.send(JSON.stringify({
+        type: 'joined',
+        professorName: session.professorName,
+        subject: session.subject,
+      }));
+      break;
+    }
+
+    case 'student_set_language': {
+      const lang = msg.language || 'en';
+      // Atualiza no Map em memória
+      if (msg.sessionId || true) {
+        for (const [, session] of activeSessions) {
+          const info = session.listeners.get(ws);
+          if (info) {
+            info.targetLang = lang;
+            break;
+          }
+        }
+      }
+      ws.send(JSON.stringify({ type: 'language_set', language: lang }));
+      break;
+    }
+  }
+}
+
+async function handleAudioData(sessionId, audioBuffer) {
+  const session = activeSessions.get(sessionId);
+  if (!session || session.listeners.size === 0) return;
+
+  // Cada chunk já é um WebM completo de ~3s (gerado pelo frontend)
+  if (audioBuffer.length < 2000) return;
+
+  // Agrupa listeners por idioma alvo
+  const byLanguage = new Map();
+  for (const [ws, info] of session.listeners) {
+    const lang = info.targetLang || 'en';
+    if (!byLanguage.has(lang)) byLanguage.set(lang, []);
+    byLanguage.get(lang).push(ws);
+  }
+
+  for (const [targetLang, listeners] of byLanguage) {
+    try {
+      const translatedAudio = await processAudioPipeline(
+        audioBuffer,
+        session.language,
+        targetLang
+      );
+
+      if (translatedAudio) {
+        for (const listener of listeners) {
+          if (listener.readyState === 1) {
+            listener.send(translatedAudio);
+          }
+        }
+      }
+    } catch (err) {
+      console.error(`Pipeline error for ${targetLang}:`, err.message);
+    }
+  }
+}
+
+function tryParseJSON(data) {
+  if (typeof data === 'string' || (Buffer.isBuffer(data) && data[0] === 0x7b)) {
+    try {
+      return JSON.parse(data.toString());
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}

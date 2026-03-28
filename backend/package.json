@@ -1,0 +1,17 @@
+{
+  "name": "uel-connect-backend",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch src/server.js",
+    "start": "node src/server.js"
+  },
+  "dependencies": {
+    "ws": "^8.16.0",
+    "express": "^4.18.2",
+    "dotenv": "^16.4.1",
+    "uuid": "^9.0.0",
+    "openai": "^4.28.0",
+    "@supabase/supabase-js": "^2.39.0"
+  }
+}
