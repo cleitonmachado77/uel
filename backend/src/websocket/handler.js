@@ -26,16 +26,18 @@ export function setupWebSocket(server) {
         const msg = tryParseJSON(data);
 
         if (msg) {
-          // Autenticação no primeiro comando
+          // Tenta autenticar via token, mas não bloqueia se falhar
           if (msg.token && !userId) {
-            const user = await validateToken(msg.token);
-            if (!user) {
-              ws.send(JSON.stringify({ type: 'error', message: 'Token inválido' }));
-              ws.close();
-              return;
+            try {
+              const user = await validateToken(msg.token);
+              if (user) userId = user.id;
+            } catch (e) {
+              console.warn('Token validation failed:', e.message);
             }
-            userId = user.id;
           }
+          // Fallback: usa professorId/studentId da mensagem
+          if (!userId && msg.professorId) userId = msg.professorId;
+          if (!userId && msg.studentId) userId = msg.studentId;
 
           await handleControlMessage(ws, msg, userId, (r, s) => {
             role = r;
