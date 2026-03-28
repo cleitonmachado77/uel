@@ -72,8 +72,7 @@ export default function ProfilePage() {
 
   return (
     <main className="relative min-h-screen flex flex-col items-center px-6 py-8">
-      <div className="absolute inset-0 -z-10">
-        <img src="/bg-app.jpg" alt="" className="w-full h-full object-cover" />
+      <div className="absolute inset-0 -z-10 bg-cover bg-center bg-no-repeat" style={{ backgroundImage: 'url(/bg-app.jpg)' }}>
         <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" />
       </div>
       <div className="w-full max-w-md mb-6">

@@ -1,6 +1,5 @@
 'use client';
 import { useState, useRef, useCallback, useEffect } from 'react';
-import Image from 'next/image';
 import { WSClient } from '@/lib/websocket';
 import { useAudioCapture } from '@/hooks/useAudioCapture';
 import { useAuth } from '@/contexts/AuthContext';
@@ -96,8 +95,7 @@ export default function ProfessorPage() {
 
   return (
     <main className="relative min-h-screen flex flex-col items-center px-6 py-8">
-      <div className="absolute inset-0 -z-10">
-        <Image src="/bg-app.jpg" alt="" fill className="object-cover" priority />
+      <div className="absolute inset-0 -z-10 bg-cover bg-center bg-no-repeat" style={{ backgroundImage: 'url(/bg-app.jpg)' }}>
         <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" />
       </div>
       <div className="w-full max-w-md mb-6">
