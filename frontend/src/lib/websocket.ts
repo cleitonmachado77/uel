@@ -20,34 +20,38 @@ export class WSClient {
     this.handlers = handlers;
   }
 
-  connect() {
-    this.ws = new WebSocket(WS_URL);
-    this.ws.binaryType = 'arraybuffer';
+  connect(): Promise<void> {
+    return new Promise((resolve, reject) => {
+      this.ws = new WebSocket(WS_URL);
+      this.ws.binaryType = 'arraybuffer';
 
-    this.ws.onopen = () => {
-      console.log('WebSocket connected');
-    };
+      this.ws.onopen = () => {
+        console.log('WebSocket connected');
+        resolve();
+      };
 
-    this.ws.onmessage = (event) => {
-      if (event.data instanceof ArrayBuffer) {
-        this.handlers.onAudio?.(event.data);
-      } else {
-        try {
-          const msg = JSON.parse(event.data);
-          this.handlers.onMessage?.(msg);
-        } catch {
-          console.warn('Unparseable message:', event.data);
+      this.ws.onmessage = (event) => {
+        if (event.data instanceof ArrayBuffer) {
+          this.handlers.onAudio?.(event.data);
+        } else {
+          try {
+            const msg = JSON.parse(event.data);
+            this.handlers.onMessage?.(msg);
+          } catch {
+            console.warn('Unparseable message:', event.data);
+          }
         }
-      }
-    };
+      };
 
-    this.ws.onclose = () => {
-      this.handlers.onClose?.();
-    };
+      this.ws.onclose = () => {
+        this.handlers.onClose?.();
+      };
 
-    this.ws.onerror = (err) => {
-      this.handlers.onError?.(err);
-    };
+      this.ws.onerror = (err) => {
+        this.handlers.onError?.(err);
+        reject(err);
+      };
+    });
   }
 
   send(msg: WSMessage) {

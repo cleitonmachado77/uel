@@ -67,19 +67,17 @@ export default function ProfessorPage() {
       },
     });
 
-    ws.connect();
+    await ws.connect();
     wsRef.current = ws;
 
-    setTimeout(() => {
-      ws.send({
-        type: 'professor_start',
-        token: authSession?.access_token,
-        professorId: user?.id,
-        professorName,
-        subject,
-        language: locale,
-      });
-    }, 500);
+    ws.send({
+      type: 'professor_start',
+      token: authSession?.access_token,
+      professorId: user?.id,
+      professorName,
+      subject,
+      language: 'pt',
+    });
   };
 
   const stopSession = () => {

@@ -3,6 +3,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { WSClient, WSMessage } from '@/lib/websocket';
 import { useAudioPlayer } from '@/hooks/useAudioPlayer';
 import { useLocale } from '@/contexts/LocaleContext';
+import { useAuth } from '@/contexts/AuthContext';
 import { supabase } from '@/lib/supabase';
 
 type Session = {
@@ -30,6 +31,7 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
 
 export default function StudentPage() {
   const { t } = useLocale();
+  const { user, session: authSession } = useAuth();
   const [sessions, setSessions] = useState<Session[]>([]);
   const [connected, setConnected] = useState(false);
   const [currentSession, setCurrentSession] = useState<Session | null>(null);
@@ -93,7 +95,7 @@ export default function StudentPage() {
     };
   }, []);
 
-  const joinSession = (session: Session) => {
+  const joinSession = async (session: Session) => {
     initPlayer();
 
     const ws = new WSClient({
@@ -117,12 +119,10 @@ export default function StudentPage() {
       },
     });
 
-    ws.connect();
+    await ws.connect();
     wsRef.current = ws;
 
-    setTimeout(() => {
-      ws.send({ type: 'student_join', sessionId: session.id });
-    }, 500);
+    ws.send({ type: 'student_join', sessionId: session.id, token: authSession?.access_token, studentId: user?.id });
   };
 
   const leaveSession = () => {
