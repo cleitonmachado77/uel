@@ -89,26 +89,31 @@ async function handleControlMessage(ws, msg, userId, setRole) {
         return;
       }
 
-      // Persiste no Supabase
-      const dbSession = await createSession(
-        professorId,
-        msg.subject || 'Aula',
-        msg.language || 'pt'
-      );
+      try {
+        // Persiste no Supabase
+        const dbSession = await createSession(
+          professorId,
+          msg.subject || 'Aula',
+          msg.language || 'pt'
+        );
 
-      const sessionId = dbSession.id;
-      activeSessions.set(sessionId, {
-        professorWs: ws,
-        professorId,
-        professorName: msg.professorName || 'Professor',
-        subject: dbSession.subject,
-        language: dbSession.language,
-        listeners: new Map(),
-      });
+        const sessionId = dbSession.id;
+        activeSessions.set(sessionId, {
+          professorWs: ws,
+          professorId,
+          professorName: msg.professorName || 'Professor',
+          subject: dbSession.subject,
+          language: dbSession.language,
+          listeners: new Map(),
+        });
 
-      setRole('professor', sessionId);
-      ws.send(JSON.stringify({ type: 'session_created', sessionId }));
-      console.log(`Session ${sessionId} created by ${msg.professorName}`);
+        setRole('professor', sessionId);
+        ws.send(JSON.stringify({ type: 'session_created', sessionId }));
+        console.log(`Session ${sessionId} created by ${msg.professorName}`);
+      } catch (err) {
+        console.error('professor_start error:', err.message);
+        ws.send(JSON.stringify({ type: 'error', message: err.message }));
+      }
       break;
     }
 
