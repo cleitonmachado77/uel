@@ -1,14 +1,16 @@
 'use client';
 import { useState, useRef, useCallback, useEffect } from 'react';
+import Image from 'next/image';
 import { WSClient } from '@/lib/websocket';
 import { useAudioCapture } from '@/hooks/useAudioCapture';
 import { useAuth } from '@/contexts/AuthContext';
 import { useLocale } from '@/contexts/LocaleContext';
 import { supabase } from '@/lib/supabase';
+import { type Locale, LOCALES } from '@/lib/i18n';
 
 export default function ProfessorPage() {
   const { user, session: authSession } = useAuth();
-  const { t } = useLocale();
+  const { locale, t } = useLocale();
   const [status, setStatus] = useState<'idle' | 'live' | 'connecting'>('idle');
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [subject, setSubject] = useState('');
@@ -76,7 +78,7 @@ export default function ProfessorPage() {
         professorId: user?.id,
         professorName,
         subject,
-        language: 'pt',
+        language: locale,
       });
     }, 500);
   };
@@ -95,7 +97,7 @@ export default function ProfessorPage() {
   return (
     <main className="relative min-h-screen flex flex-col items-center px-6 py-8">
       <div className="absolute inset-0 -z-10">
-        <img src="/bg-app.jpg" alt="" className="w-full h-full object-cover" />
+        <Image src="/bg-app.jpg" alt="" fill className="object-cover" priority />
         <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" />
       </div>
       <div className="w-full max-w-md mb-6">
@@ -120,7 +122,9 @@ export default function ProfessorPage() {
             )}
             <div>
               <p className="text-white font-semibold">{professorName}</p>
-              <p className="text-gray-500 text-xs">{t('professor.lang_label')}</p>
+              <p className="text-gray-500 text-xs">
+                {t('professor.lang_label').replace(/:.+/, `: ${LOCALES.find(l => l.code === locale)?.label || locale} ${LOCALES.find(l => l.code === locale)?.flag || ''}`)}
+              </p>
             </div>
           </div>
 

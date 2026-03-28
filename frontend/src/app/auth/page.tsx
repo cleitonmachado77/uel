@@ -13,9 +13,10 @@ export default function AuthPage() {
   const t = (key: string) => isLogin ? translate(key, 'en') : translate(key, locale);
   const [email, setEmail] = useState('');
 
-  // Reseta idioma pra inglês ao entrar na tela de auth
+  // Reseta idioma pra inglês apenas se não houver idioma salvo
   useEffect(() => {
-    setLocale('en');
+    const saved = localStorage.getItem('uel-locale');
+    if (!saved) setLocale('en');
   }, []);
   const [password, setPassword] = useState('');
   const [name, setName] = useState('');

@@ -159,5 +159,5 @@ const translations: Record<Locale, Record<string, string>> = {
 };
 
 export function t(key: string, locale: Locale): string {
-  return translations[locale]?.[key] || translations.pt[key] || key;
+  return translations[locale]?.[key] || translations.en[key] || translations.pt[key] || key;
 }
