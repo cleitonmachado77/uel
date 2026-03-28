@@ -114,8 +114,14 @@ export default function StudentPage() {
         enqueue(data);
       },
       onClose: () => {
-        setConnected(false);
-        setCurrentSession(null);
+        // Tenta reconectar automaticamente se estava conectado
+        if (connected) {
+          console.log('WebSocket closed, reconnecting...');
+          setTimeout(() => joinSession(session), 2000);
+        } else {
+          setConnected(false);
+          setCurrentSession(null);
+        }
       },
     });
 

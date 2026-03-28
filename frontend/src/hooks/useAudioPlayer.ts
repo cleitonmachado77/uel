@@ -1,38 +1,27 @@
 'use client';
 import { useRef, useCallback, useState } from 'react';
 
+/**
+ * Player de áudio usando elemento <audio> — mais compatível com mobile
+ */
 export function useAudioPlayer() {
   const [isPlaying, setIsPlaying] = useState(false);
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const queueRef = useRef<ArrayBuffer[]>([]);
+  const queueRef = useRef<string[]>([]);
   const playingRef = useRef(false);
-  const sourceRef = useRef<AudioBufferSourceNode | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
 
-  const getContext = useCallback(() => {
-    if (!audioContextRef.current || audioContextRef.current.state === 'closed') {
-      audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+  const init = useCallback(() => {
+    // Cria elemento de áudio no contexto de interação do usuário
+    if (!audioRef.current) {
+      const audio = new Audio();
+      audio.playsInline = true;
+      audio.setAttribute('playsinline', '');
+      audioRef.current = audio;
     }
-    // Resume se estiver suspenso (mobile requer isso)
-    if (audioContextRef.current.state === 'suspended') {
-      audioContextRef.current.resume();
-    }
-    return audioContextRef.current;
   }, []);
 
-  // Deve ser chamado em resposta a um toque do usuário
-  const init = useCallback(() => {
-    const ctx = getContext();
-    // Toca um buffer vazio pra desbloquear o áudio no mobile
-    const buffer = ctx.createBuffer(1, 1, 22050);
-    const source = ctx.createBufferSource();
-    source.buffer = buffer;
-    source.connect(ctx.destination);
-    source.start(0);
-  }, [getContext]);
-
-  const playNext = useCallback(async () => {
-    const ctx = audioContextRef.current;
-    if (!ctx || queueRef.current.length === 0) {
+  const playNext = useCallback(() => {
+    if (queueRef.current.length === 0) {
       playingRef.current = false;
       setIsPlaying(false);
       return;
@@ -41,44 +30,48 @@ export function useAudioPlayer() {
     playingRef.current = true;
     setIsPlaying(true);
 
-    const data = queueRef.current.shift()!;
-    try {
-      // Resume antes de decodificar (mobile)
-      if (ctx.state === 'suspended') await ctx.resume();
-      
-      const audioBuffer = await ctx.decodeAudioData(data.slice(0));
-      const source = ctx.createBufferSource();
-      source.buffer = audioBuffer;
-      source.connect(ctx.destination);
-      sourceRef.current = source;
-      source.onended = () => {
-        sourceRef.current = null;
-        playNext();
-      };
-      source.start();
-    } catch {
-      // Se falhar a decodificação, tenta o próximo
-      playNext();
+    const blobUrl = queueRef.current.shift()!;
+    const audio = audioRef.current;
+    if (!audio) {
+      playingRef.current = false;
+      setIsPlaying(false);
+      return;
     }
+
+    audio.src = blobUrl;
+    audio.onended = () => {
+      URL.revokeObjectURL(blobUrl);
+      playNext();
+    };
+    audio.onerror = () => {
+      URL.revokeObjectURL(blobUrl);
+      playNext();
+    };
+    audio.play().catch(() => {
+      // Autoplay bloqueado — tenta de novo no próximo
+      URL.revokeObjectURL(blobUrl);
+      playNext();
+    });
   }, []);
 
   const enqueue = useCallback((audioData: ArrayBuffer) => {
-    // Garante que o contexto existe
-    getContext();
-    queueRef.current.push(audioData);
+    const blob = new Blob([audioData], { type: 'audio/mpeg' });
+    const url = URL.createObjectURL(blob);
+    queueRef.current.push(url);
     if (!playingRef.current) {
       playNext();
     }
-  }, [getContext, playNext]);
+  }, [playNext]);
 
   const stop = useCallback(() => {
+    queueRef.current.forEach(URL.revokeObjectURL);
     queueRef.current = [];
     playingRef.current = false;
     setIsPlaying(false);
-    sourceRef.current?.stop();
-    sourceRef.current = null;
-    audioContextRef.current?.close();
-    audioContextRef.current = null;
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.src = '';
+    }
   }, []);
 
   return { isPlaying, enqueue, stop, init };
