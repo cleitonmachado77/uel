@@ -45,7 +45,6 @@ export async function transcribeAudio(audioBuffer, language = 'pt') {
   url.searchParams.set('model', 'nova-3');
   url.searchParams.set('language', langCode);
   url.searchParams.set('punctuate', 'true');
-  url.searchParams.set('smart_format', 'true');
 
   console.log(`[STT/Deepgram] content-type: ${contentType}, lang: ${langCode}, buffer: ${audioBuffer.length} bytes`);
 

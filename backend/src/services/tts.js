@@ -1,12 +1,10 @@
 /**
- * Text-to-Speech usando Inworld AI TTS 1.5 Max
+ * Text-to-Speech usando Inworld AI TTS 1.5 Mini (ultra-low latency ~120ms)
  * https://docs.inworld.ai/api-reference/ttsAPI/texttospeech/synthesize-speech
  */
 
 const INWORLD_API_KEY = process.env.INWORLD_API_KEY;
 
-// Vozes padrão por idioma (Inworld suporta cross-language com qualquer voz,
-// mas vozes nativas do idioma produzem melhor qualidade)
 const VOICE_MAP = {
   en: 'Dennis',
   es: 'Dennis',
@@ -34,14 +32,15 @@ export async function synthesizeSpeech(text, language = 'en') {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        text: text.substring(0, 2000), // limite de 2000 chars da API
+        text: text.substring(0, 2000),
         voiceId,
-        modelId: 'inworld-tts-1.5-max',
+        modelId: 'inworld-tts-1.5-mini',  // mini = ~120ms vs ~200ms do max
         audioConfig: {
           audioEncoding: 'MP3',
-          sampleRateHertz: 44100,
+          sampleRateHertz: 24000,  // 24kHz é suficiente para voz, menor payload
         },
-        temperature: 1.0,
+        talkingSpeed: 0.85,        // 85% da velocidade normal — mais natural para aula
+        temperature: 0.7,          // menos variação = mais estável e previsível
         applyTextNormalization: 'ON',
       }),
     });
