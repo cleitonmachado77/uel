@@ -22,6 +22,23 @@ const HALLUCINATION_PATTERNS = [
   /big fan of music/i,
 ];
 
+/**
+ * Detecta o mimeType real do buffer de áudio pelo magic number.
+ */
+function detectMimeType(audioBuffer) {
+  const buf = Buffer.from(audioBuffer);
+  if (buf.length >= 4 && buf[0] === 0x1a && buf[1] === 0x45 && buf[2] === 0xdf && buf[3] === 0xa3) {
+    return 'audio/webm';
+  }
+  if (buf.length >= 8 && buf.toString('ascii', 4, 8) === 'ftyp') {
+    return 'audio/mp4';
+  }
+  if (buf.length >= 4 && buf.toString('ascii', 0, 4) === 'OggS') {
+    return 'audio/ogg';
+  }
+  return 'audio/webm'; // fallback
+}
+
 export async function transcribeAndTranslate(audioBuffer, sourceLang, targetLang) {
   if (audioBuffer.length < 1000) return { transcript: '', translated: '' };
 
@@ -39,7 +56,7 @@ export async function transcribeAndTranslate(audioBuffer, sourceLang, targetLang
         contents: [{
           role: 'user',
           parts: [
-            { inlineData: { mimeType: 'audio/webm', data: audioBase64 } },
+            { inlineData: { mimeType: detectMimeType(audioBuffer), data: audioBase64 } },
             { text: `Transcribe only ${sourceName} speech, translate to ${targetName}. No timestamps. Silence=NONE\nT: text\nR: translation` },
           ],
         }],

@@ -98,7 +98,9 @@ export default function StudentPage() {
   }, []);
 
   const joinSession = async (session: Session) => {
+    // init DEVE rodar dentro do handler de clique (gesto do usuário) para desbloquear áudio no mobile
     initPlayer();
+
     setConnected(true);
     setCurrentSession(session);
 
@@ -120,7 +122,6 @@ export default function StudentPage() {
         },
         onClose: () => {
           console.log('WebSocket closed, reconnecting in 3s...');
-          // Reconecta automaticamente após 3s
           setTimeout(() => {
             if (wsRef.current) connectWs();
           }, 3000);
@@ -139,6 +140,14 @@ export default function StudentPage() {
 
     await connectWs();
   };
+
+  // Re-desbloqueia áudio ao tocar na tela (caso o iOS tenha suspendido)
+  useEffect(() => {
+    if (!connected) return;
+    const handleInteraction = () => { initPlayer(); };
+    document.addEventListener('touchstart', handleInteraction, { once: true });
+    return () => { document.removeEventListener('touchstart', handleInteraction); };
+  }, [connected, initPlayer]);
 
   const leaveSession = () => {
     const ws = wsRef.current;

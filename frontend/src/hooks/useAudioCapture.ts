@@ -1,14 +1,35 @@
 'use client';
 import { useRef, useState, useCallback } from 'react';
 
+/**
+ * Captura de áudio com compatibilidade mobile.
+ * - Detecta mimeType suportado (webm/opus não funciona no iOS Safari)
+ * - Resume AudioContext suspenso (política mobile)
+ */
+
+function getSupportedMimeType(): string {
+  const types = [
+    'audio/webm;codecs=opus',
+    'audio/webm',
+    'audio/mp4',
+    'audio/aac',
+    'audio/ogg;codecs=opus',
+    '',
+  ];
+  for (const t of types) {
+    if (t === '' || MediaRecorder.isTypeSupported(t)) return t;
+  }
+  return '';
+}
+
 export function useAudioCapture(onAudioChunk: (data: Blob) => void) {
   const [isCapturing, setIsCapturing] = useState(false);
   const streamRef = useRef<MediaStream | null>(null);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
+  const mimeRef = useRef<string>('');
 
-  // Mede volume RMS do áudio atual
   const getVolume = useCallback(() => {
     const analyser = analyserRef.current;
     if (!analyser) return 0;
@@ -22,9 +43,17 @@ export function useAudioCapture(onAudioChunk: (data: Blob) => void) {
   }, []);
 
   const startRecording = useCallback((stream: MediaStream) => {
-    const recorder = new MediaRecorder(stream, {
-      mimeType: 'audio/webm;codecs=opus',
-    });
+    const options: MediaRecorderOptions = {};
+    if (mimeRef.current) options.mimeType = mimeRef.current;
+
+    let recorder: MediaRecorder;
+    try {
+      recorder = new MediaRecorder(stream, options);
+    } catch {
+      // Fallback sem mimeType específico
+      recorder = new MediaRecorder(stream);
+    }
+
     const chunks: Blob[] = [];
     let peakVolume = 0;
 
@@ -35,26 +64,37 @@ export function useAudioCapture(onAudioChunk: (data: Blob) => void) {
     };
 
     recorder.onstop = () => {
-      // Só envia se o pico de volume indicar fala real (threshold 0.02)
       if (chunks.length > 0 && peakVolume > 0.02) {
-        const blob = new Blob(chunks, { type: 'audio/webm' });
+        const blob = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' });
         onAudioChunk(blob);
       }
     };
 
-    recorder.start(250); // Checa volume a cada 250ms
+    recorder.start(250);
     setTimeout(() => {
       if (recorder.state === 'recording') recorder.stop();
     }, 2000);
   }, [onAudioChunk, getVolume]);
 
   const start = useCallback(async () => {
+    // Detecta mimeType suportado uma vez
+    mimeRef.current = getSupportedMimeType();
+    console.log('[AudioCapture] Using mimeType:', mimeRef.current || '(default)');
+
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: true, noiseSuppression: true, sampleRate: 16000 },
     });
     streamRef.current = stream;
 
-    const audioCtx = new AudioContext();
+    // Usa webkitAudioContext como fallback (iOS Safari antigo)
+    const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+    const audioCtx = new AudioCtx();
+
+    // Resume contexto suspenso (política mobile)
+    if (audioCtx.state === 'suspended') {
+      await audioCtx.resume();
+    }
+
     const source = audioCtx.createMediaStreamSource(stream);
     const analyser = audioCtx.createAnalyser();
     analyser.fftSize = 1024;
