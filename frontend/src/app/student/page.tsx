@@ -36,6 +36,7 @@ export default function StudentPage() {
   const [connected, setConnected] = useState(false);
   const [currentSession, setCurrentSession] = useState<Session | null>(null);
   const [targetLang, setTargetLang] = useState('en');
+  const targetLangRef = useRef(targetLang);
   const [loading, setLoading] = useState(true);
   const wsRef = useRef<WSClient | null>(null);
   const { isPlaying, enqueue, stop: stopPlayer, init: initPlayer } = useAudioPlayer();
@@ -109,7 +110,7 @@ export default function StudentPage() {
       const ws = new WSClient({
         onMessage: (msg: WSMessage) => {
           if (msg.type === 'joined') {
-            ws.send({ type: 'student_set_language', language: targetLang });
+            ws.send({ type: 'student_set_language', language: targetLangRef.current });
           }
           if (msg.type === 'session_ended') {
             leaveSession();
@@ -131,6 +132,7 @@ export default function StudentPage() {
         ws.send({
           type: 'student_join',
           sessionId: session.id,
+          language: targetLangRef.current,
           token: authSession?.access_token || null,
           studentId: user?.id || null,
         });
@@ -166,6 +168,7 @@ export default function StudentPage() {
 
   const changeLanguage = (lang: string) => {
     setTargetLang(lang);
+    targetLangRef.current = lang;
     wsRef.current?.send({ type: 'student_set_language', language: lang });
   };
 

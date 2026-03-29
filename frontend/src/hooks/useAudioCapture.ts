@@ -64,7 +64,7 @@ export function useAudioCapture(onAudioChunk: (data: Blob) => void) {
     };
 
     recorder.onstop = () => {
-      if (chunks.length > 0 && peakVolume > 0.02) {
+      if (chunks.length > 0 && peakVolume > 0.04) {
         const blob = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' });
         onAudioChunk(blob);
       }

@@ -13,6 +13,11 @@ export async function processAudioPipeline(audioBuffer, sourceLang, targetLang) 
   // 1. STT (Deepgram Nova-3)
   const transcript = await transcribeAudio(audioBuffer, sourceLang);
   if (!transcript || transcript.trim().length < 2) return null;
+
+  // Filtra transcrições que são apenas pontuação, repetição ou ruído
+  const cleaned = transcript.replace(/[.,!?;:\-–—…\s]/g, '');
+  if (cleaned.length < 2) return null;
+
   const t1 = Date.now();
 
   // 2. Tradução (DeepL)

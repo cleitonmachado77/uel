@@ -199,7 +199,8 @@ async function handleAudioData(sessionId, audioBuffer) {
   if (!session || session.listeners.size === 0) return;
 
   // Cada chunk já é um WebM completo de ~3s (gerado pelo frontend)
-  if (audioBuffer.length < 2000) return;
+  // Chunks muito pequenos são silêncio/ruído — descarta
+  if (audioBuffer.length < 5000) return;
 
   // Agrupa listeners por idioma alvo
   const byLanguage = new Map();
