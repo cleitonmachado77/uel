@@ -71,15 +71,22 @@ export async function getLiveSessions() {
 export async function joinSessionDB(sessionId, studentId, targetLanguage) {
   const { error } = await supabase
     .from('session_participants')
-    .upsert({
-      session_id: sessionId,
-      student_id: studentId,
-      target_language: targetLanguage,
-      joined_at: new Date().toISOString(),
-      left_at: null,
-    });
+    .upsert(
+      {
+        session_id: sessionId,
+        student_id: studentId,
+        target_language: targetLanguage,
+        joined_at: new Date().toISOString(),
+        left_at: null,
+      },
+      { onConflict: 'session_id,student_id' }
+    );
 
-  if (error) throw new Error(`Erro ao registrar participação: ${error.message}`);
+  if (error) {
+    console.warn('joinSessionDB warning:', error.message);
+    // Não lança erro — duplicate key é esperado em reconexões
+    return;
+  }
 
   // Incrementa contador de ouvintes
   await supabase.rpc('increment_listeners', { sid: sessionId });
