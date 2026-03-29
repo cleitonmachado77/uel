@@ -16,7 +16,21 @@ global.activeSessions = activeSessions;
 export function setupWebSocket(server) {
   const wss = new WebSocketServer({ server, path: '/ws' });
 
+  // Ping nativo a cada 20s pra manter conexões vivas através de proxies
+  const pingInterval = setInterval(() => {
+    wss.clients.forEach((ws) => {
+      if (ws.isAlive === false) return ws.terminate();
+      ws.isAlive = false;
+      ws.ping();
+    });
+  }, 20000);
+
+  wss.on('close', () => clearInterval(pingInterval));
+
   wss.on('connection', (ws) => {
+    ws.isAlive = true;
+    ws.on('pong', () => { ws.isAlive = true; });
+
     let role = null;
     let sessionId = null;
     let userId = null;
