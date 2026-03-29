@@ -102,42 +102,49 @@ export default function StudentPage() {
     setConnected(true);
     setCurrentSession(session);
 
-    const ws = new WSClient({
-      onMessage: (msg: WSMessage) => {
-        if (msg.type === 'joined') {
-          ws.send({ type: 'student_set_language', language: targetLang });
-        }
-        if (msg.type === 'session_ended') {
-          leaveSession();
-        }
-        if (msg.type === 'error') {
-          console.error('WS error:', msg.message);
-        }
-      },
-      onAudio: (data: ArrayBuffer) => {
-        enqueue(data);
-      },
-      onClose: () => {
-        // Não remove o player — mantém UI estável no mobile
-        console.log('WebSocket closed');
-      },
-    });
+    const connectWs = async () => {
+      const ws = new WSClient({
+        onMessage: (msg: WSMessage) => {
+          if (msg.type === 'joined') {
+            ws.send({ type: 'student_set_language', language: targetLang });
+          }
+          if (msg.type === 'session_ended') {
+            leaveSession();
+          }
+          if (msg.type === 'error') {
+            console.error('WS error:', msg.message);
+          }
+        },
+        onAudio: (data: ArrayBuffer) => {
+          enqueue(data);
+        },
+        onClose: () => {
+          console.log('WebSocket closed, reconnecting in 3s...');
+          // Reconecta automaticamente após 3s
+          setTimeout(() => {
+            if (wsRef.current) connectWs();
+          }, 3000);
+        },
+      });
 
-    try {
-      await ws.connect();
-      wsRef.current = ws;
-      ws.send({ type: 'student_join', sessionId: session.id, token: authSession?.access_token, studentId: user?.id });
-    } catch {
-      console.error('Failed to connect WebSocket');
-      setConnected(false);
-      setCurrentSession(null);
-    }
+      try {
+        await ws.connect();
+        wsRef.current = ws;
+        ws.send({ type: 'student_join', sessionId: session.id, token: authSession?.access_token, studentId: user?.id });
+      } catch {
+        console.error('Failed to connect, retrying in 3s...');
+        setTimeout(() => connectWs(), 3000);
+      }
+    };
+
+    await connectWs();
   };
 
   const leaveSession = () => {
+    const ws = wsRef.current;
+    wsRef.current = null; // Para a reconexão automática
     stopPlayer();
-    wsRef.current?.disconnect();
-    wsRef.current = null;
+    ws?.disconnect();
     setConnected(false);
     setCurrentSession(null);
   };
