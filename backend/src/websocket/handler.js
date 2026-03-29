@@ -159,7 +159,6 @@ async function handleControlMessage(ws, msg, userId, setRole) {
 
     case 'student_set_language': {
       const lang = msg.language || 'en';
-      // Atualiza no Map em memória
       if (msg.sessionId || true) {
         for (const [, session] of activeSessions) {
           const info = session.listeners.get(ws);
@@ -170,6 +169,11 @@ async function handleControlMessage(ws, msg, userId, setRole) {
         }
       }
       ws.send(JSON.stringify({ type: 'language_set', language: lang }));
+      break;
+    }
+
+    case 'ping': {
+      ws.send(JSON.stringify({ type: 'pong' }));
       break;
     }
   }
