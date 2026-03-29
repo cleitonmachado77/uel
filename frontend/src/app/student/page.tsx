@@ -78,7 +78,9 @@ export default function StudentPage() {
 
   useEffect(() => {
     fetchSessions();
-    const interval = setInterval(fetchSessions, 3000);
+    const interval = setInterval(() => {
+      if (!connected) fetchSessions(); // Não faz polling enquanto conectado
+    }, 3000);
 
     const channel = supabase
       .channel('sessions-realtime')
@@ -97,32 +99,39 @@ export default function StudentPage() {
 
   const joinSession = async (session: Session) => {
     initPlayer();
+    setConnected(true);
+    setCurrentSession(session);
 
     const ws = new WSClient({
       onMessage: (msg: WSMessage) => {
         if (msg.type === 'joined') {
-          setConnected(true);
-          setCurrentSession(session);
-          // Define idioma alvo
           ws.send({ type: 'student_set_language', language: targetLang });
         }
         if (msg.type === 'session_ended') {
           leaveSession();
+        }
+        if (msg.type === 'error') {
+          console.error('WS error:', msg.message);
         }
       },
       onAudio: (data: ArrayBuffer) => {
         enqueue(data);
       },
       onClose: () => {
-        setConnected(false);
-        setCurrentSession(null);
+        // Não remove o player — mantém UI estável no mobile
+        console.log('WebSocket closed');
       },
     });
 
-    await ws.connect();
-    wsRef.current = ws;
-
-    ws.send({ type: 'student_join', sessionId: session.id, token: authSession?.access_token, studentId: user?.id });
+    try {
+      await ws.connect();
+      wsRef.current = ws;
+      ws.send({ type: 'student_join', sessionId: session.id, token: authSession?.access_token, studentId: user?.id });
+    } catch {
+      console.error('Failed to connect WebSocket');
+      setConnected(false);
+      setCurrentSession(null);
+    }
   };
 
   const leaveSession = () => {
