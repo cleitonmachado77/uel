@@ -7,9 +7,9 @@ Tradução de aulas em tempo real para alunos estrangeiros da UEL.
 ```
 Professor (mic) → WebSocket → Backend Pipeline → WebSocket → Aluno (fones)
                                   │
-                          STT (Whisper/OpenAI)
-                          Tradução (Google Translate)
-                          TTS (Google Cloud TTS)
+                          STT (Deepgram Nova-3)
+                          Tradução (DeepL)
+                          TTS (Inworld AI 1.5 Max)
 ```
 
 ## Estrutura
@@ -25,8 +25,9 @@ uel-connect/
 
 ### Pré-requisitos
 - Node.js 18+
-- Chave de API OpenAI (para Whisper STT)
-- Credenciais Google Cloud (Translation + TTS)
+- Chave de API Deepgram (STT)
+- Chave de API DeepL (Tradução)
+- Chave de API Inworld AI (TTS)
 
 ### Backend
 
@@ -62,7 +63,7 @@ O backend roda em `http://localhost:3001` e o frontend em `http://localhost:3000
 ## Fluxo
 
 1. Professor acessa `/professor`, configura nome/disciplina/idioma e inicia transmissão
-2. Áudio é capturado via MediaRecorder (blocos de ~500ms) e enviado via WebSocket
-3. Backend processa: Whisper STT → Google Translate → Google TTS
+2. Áudio é capturado via MediaRecorder (blocos de ~2s) e enviado via WebSocket
+3. Backend processa: Deepgram STT → DeepL Translate → Inworld AI TTS
 4. Áudio traduzido é enviado via WebSocket para alunos conectados
 5. Aluno acessa `/student`, escolhe idioma alvo, entra na sessão e ouve pelo player

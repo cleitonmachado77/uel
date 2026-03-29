@@ -1,36 +1,65 @@
-const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY;
+/**
+ * Text-to-Speech usando Inworld AI TTS 1.5 Max
+ * https://docs.inworld.ai/api-reference/ttsAPI/texttospeech/synthesize-speech
+ */
 
+const INWORLD_API_KEY = process.env.INWORLD_API_KEY;
+
+// Vozes padrão por idioma (Inworld suporta cross-language com qualquer voz,
+// mas vozes nativas do idioma produzem melhor qualidade)
 const VOICE_MAP = {
-  en: { languageCode: 'en-US', name: 'en-US-Standard-C' },
-  es: { languageCode: 'es-ES', name: 'es-ES-Standard-A' },
-  fr: { languageCode: 'fr-FR', name: 'fr-FR-Standard-A' },
-  de: { languageCode: 'de-DE', name: 'de-DE-Standard-A' },
-  it: { languageCode: 'it-IT', name: 'it-IT-Standard-A' },
-  pt: { languageCode: 'pt-BR', name: 'pt-BR-Standard-A' },
-  ja: { languageCode: 'ja-JP', name: 'ja-JP-Standard-A' },
-  ko: { languageCode: 'ko-KR', name: 'ko-KR-Standard-A' },
-  zh: { languageCode: 'cmn-CN', name: 'cmn-CN-Standard-A' },
+  en: 'Dennis',
+  es: 'Dennis',
+  fr: 'Dennis',
+  de: 'Dennis',
+  it: 'Dennis',
+  pt: 'Dennis',
+  ja: 'Dennis',
+  ko: 'Dennis',
+  zh: 'Dennis',
 };
 
 export async function synthesizeSpeech(text, language = 'en') {
-  const voice = VOICE_MAP[language] || VOICE_MAP.en;
-  const url = `https://texttospeech.googleapis.com/v1/text:synthesize?key=${GOOGLE_API_KEY}`;
-
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      input: { text },
-      voice: { languageCode: voice.languageCode, name: voice.name },
-      audioConfig: { audioEncoding: 'MP3', speakingRate: 1.15 },
-    }),
-  });
-
-  if (!response.ok) {
-    const err = await response.text();
-    throw new Error(`TTS error: ${err.substring(0, 200)}`);
+  if (!text || text.trim().length === 0) {
+    throw new Error('TTS: texto vazio');
   }
 
-  const data = await response.json();
-  return Buffer.from(data.audioContent, 'base64');
+  const voiceId = VOICE_MAP[language] || 'Dennis';
+
+  try {
+    const response = await fetch('https://api.inworld.ai/tts/v1/voice', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Basic ${INWORLD_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        text: text.substring(0, 2000), // limite de 2000 chars da API
+        voiceId,
+        modelId: 'inworld-tts-1.5-max',
+        audioConfig: {
+          audioEncoding: 'MP3',
+          sampleRateHertz: 44100,
+        },
+        temperature: 1.0,
+        applyTextNormalization: 'ON',
+      }),
+    });
+
+    if (!response.ok) {
+      const err = await response.text();
+      throw new Error(`Inworld TTS error (${response.status}): ${err.substring(0, 300)}`);
+    }
+
+    const data = await response.json();
+
+    if (!data.audioContent) {
+      throw new Error('Inworld TTS: resposta sem audioContent');
+    }
+
+    return Buffer.from(data.audioContent, 'base64');
+  } catch (err) {
+    console.error('TTS error:', err.message);
+    throw err;
+  }
 }

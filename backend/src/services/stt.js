@@ -1,81 +1,74 @@
-const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY;
+/**
+ * Speech-to-Text usando Deepgram Nova-3
+ * https://developers.deepgram.com/docs/stt/getting-started
+ */
+
+const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY;
 
 const LANG_CODES = {
   pt: 'pt-BR',
   en: 'en-US',
-  es: 'es-ES',
-  fr: 'fr-FR',
-  de: 'de-DE',
-  it: 'it-IT',
-  ja: 'ja-JP',
-  ko: 'ko-KR',
-  zh: 'cmn-Hans-CN',
+  es: 'es',
+  fr: 'fr',
+  de: 'de',
+  it: 'it',
+  ja: 'ja',
+  ko: 'ko',
+  zh: 'zh',
 };
 
 /**
- * Detecta o formato do áudio pelo magic number do buffer.
- * Retorna a config adequada para o Google Speech API.
+ * Detecta o content-type do áudio pelo magic number do buffer.
  */
-function detectAudioEncoding(audioBuffer) {
+function detectContentType(audioBuffer) {
   const buf = Buffer.from(audioBuffer);
 
-  // WebM: começa com 0x1A45DFA3 (EBML header)
   if (buf.length >= 4 && buf[0] === 0x1a && buf[1] === 0x45 && buf[2] === 0xdf && buf[3] === 0xa3) {
-    return { encoding: 'WEBM_OPUS', sampleRateHertz: 48000 };
+    return 'audio/webm';
   }
-
-  // MP4/M4A/AAC container: "ftyp" signature at offset 4
   if (buf.length >= 8 && buf.toString('ascii', 4, 8) === 'ftyp') {
-    // MP4 container — Google STT não suporta diretamente, usamos encoding AUTO
-    return { encoding: 'ENCODING_UNSPECIFIED', sampleRateHertz: 48000 };
+    return 'audio/mp4';
   }
-
-  // OGG: "OggS"
   if (buf.length >= 4 && buf.toString('ascii', 0, 4) === 'OggS') {
-    return { encoding: 'OGG_OPUS', sampleRateHertz: 48000 };
+    return 'audio/ogg';
   }
-
-  // Fallback: deixa o Google tentar detectar
-  return { encoding: 'ENCODING_UNSPECIFIED', sampleRateHertz: 48000 };
+  return 'audio/webm';
 }
 
 export async function transcribeAudio(audioBuffer, language = 'pt') {
   if (audioBuffer.length < 1000) return '';
 
-  const audioBase64 = Buffer.from(audioBuffer).toString('base64');
-  const { encoding, sampleRateHertz } = detectAudioEncoding(audioBuffer);
-  const url = `https://speech.googleapis.com/v1/speech:recognize?key=${GOOGLE_API_KEY}`;
+  const contentType = detectContentType(audioBuffer);
+  const langCode = LANG_CODES[language] || 'pt-BR';
 
-  console.log(`[STT] Detected encoding: ${encoding}, buffer size: ${audioBuffer.length}`);
+  const url = new URL('https://api.deepgram.com/v1/listen');
+  url.searchParams.set('model', 'nova-3');
+  url.searchParams.set('language', langCode);
+  url.searchParams.set('punctuate', 'true');
+  url.searchParams.set('smart_format', 'true');
+
+  console.log(`[STT/Deepgram] content-type: ${contentType}, lang: ${langCode}, buffer: ${audioBuffer.length} bytes`);
 
   try {
-    const response = await fetch(url, {
+    const response = await fetch(url.toString(), {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        config: {
-          encoding,
-          sampleRateHertz,
-          languageCode: LANG_CODES[language] || 'pt-BR',
-          enableAutomaticPunctuation: true,
-        },
-        audio: { content: audioBase64 },
-      }),
+      headers: {
+        'Authorization': `Token ${DEEPGRAM_API_KEY}`,
+        'Content-Type': contentType,
+      },
+      body: Buffer.from(audioBuffer),
     });
 
     if (!response.ok) {
       const err = await response.text();
-      console.error('Google STT error:', err.substring(0, 200));
+      console.error('Deepgram STT error:', err.substring(0, 300));
       return '';
     }
 
     const data = await response.json();
-    const transcript = data.results
-      ?.map((r) => r.alternatives?.[0]?.transcript)
-      .filter(Boolean)
-      .join(' ');
+    const transcript = data.results?.channels?.[0]?.alternatives?.[0]?.transcript || '';
 
-    return transcript || '';
+    return transcript.trim();
   } catch (err) {
     console.error('STT error:', err.message);
     return '';
