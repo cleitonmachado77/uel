@@ -159,18 +159,12 @@ export default function StudentPage() {
     await connectWs();
   };
 
-  // Re-desbloqueia AudioContext em qualquer interação do usuário (iOS suspende ao perder foco)
+  // Re-desbloqueia áudio ao tocar na tela (iOS pode suspender ao perder foco)
   useEffect(() => {
     if (!connected) return;
     const handleInteraction = () => { initPlayer(); };
-    document.addEventListener('touchstart', handleInteraction);
-    document.addEventListener('touchend', handleInteraction);
-    document.addEventListener('click', handleInteraction);
-    return () => {
-      document.removeEventListener('touchstart', handleInteraction);
-      document.removeEventListener('touchend', handleInteraction);
-      document.removeEventListener('click', handleInteraction);
-    };
+    document.addEventListener('touchstart', handleInteraction, { once: true });
+    return () => { document.removeEventListener('touchstart', handleInteraction); };
   }, [connected, initPlayer]);
 
   const leaveSession = () => {

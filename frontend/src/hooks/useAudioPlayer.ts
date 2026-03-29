@@ -1,145 +1,60 @@
 'use client';
-import { useRef, useCallback, useState, useEffect } from 'react';
+import { useRef, useCallback, useState } from 'react';
 
 /**
- * Player de áudio compatível com mobile.
- * 
- * Usa DUAS estratégias em paralelo:
- * 1. AudioContext + decodeAudioData (preferido, funciona bem após unlock)
- * 2. <audio> element persistente no DOM como fallback
- * 
- * O init() tenta desbloquear ambos no gesto do usuário.
- * O enqueue() tenta AudioContext primeiro; se falhar, usa <audio>.
+ * Player de áudio para mobile — abordagem simples e robusta.
+ *
+ * Cria um <audio> no DOM no init() (gesto do usuário), toca silêncio para
+ * desbloquear, depois reutiliza o mesmo elemento para todos os chunks.
  */
 export function useAudioPlayer() {
   const [isPlaying, setIsPlaying] = useState(false);
   const queueRef = useRef<ArrayBuffer[]>([]);
   const playingRef = useRef(false);
-  const ctxRef = useRef<AudioContext | null>(null);
-  const audioElRef = useRef<HTMLAudioElement | null>(null);
-  const ctxUnlockedRef = useRef(false);
-  const audioElUnlockedRef = useRef(false);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const initDoneRef = useRef(false);
 
-  // Cria o <audio> element no DOM ao montar
-  useEffect(() => {
-    const audio = document.createElement('audio');
-    audio.id = 'uel-audio-player';
-    audio.setAttribute('playsinline', 'true');
-    audio.setAttribute('webkit-playsinline', 'true');
-    audio.preload = 'auto';
-    // Inserir no DOM é necessário para iOS
-    audio.style.display = 'none';
-    document.body.appendChild(audio);
-    audioElRef.current = audio;
-
-    return () => {
-      audio.pause();
-      audio.remove();
-      audioElRef.current = null;
-    };
-  }, []);
-
-  /**
-   * DEVE ser chamado dentro de um handler de clique/toque.
-   */
   const init = useCallback(() => {
-    // --- Desbloqueia AudioContext ---
-    if (!ctxRef.current) {
-      const AC = window.AudioContext || (window as any).webkitAudioContext;
-      if (AC) ctxRef.current = new AC();
-    }
-    const ctx = ctxRef.current;
-    if (ctx) {
-      if (ctx.state === 'suspended') {
-        ctx.resume().then(() => {
-          ctxUnlockedRef.current = true;
-          console.log('[AudioPlayer] AudioContext unlocked, state:', ctx.state);
-        }).catch(() => {});
-      } else if (ctx.state === 'running') {
-        ctxUnlockedRef.current = true;
-      }
-      // Toca silêncio para ativar
-      try {
-        const buf = ctx.createBuffer(1, ctx.sampleRate * 0.01, ctx.sampleRate);
-        const src = ctx.createBufferSource();
-        src.buffer = buf;
-        src.connect(ctx.destination);
-        src.start(0);
-      } catch {}
+    if (initDoneRef.current) return;
+
+    // Cria e insere no DOM
+    let audio = audioRef.current;
+    if (!audio) {
+      audio = document.createElement('audio');
+      audio.setAttribute('playsinline', 'true');
+      audio.setAttribute('webkit-playsinline', 'true');
+      (audio as any).playsInline = true;
+      audio.style.display = 'none';
+      document.body.appendChild(audio);
+      audioRef.current = audio;
     }
 
-    // --- Desbloqueia <audio> element ---
-    const audio = audioElRef.current;
-    if (audio && !audioElUnlockedRef.current) {
-      // Toca silêncio WAV mínimo
-      audio.src = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=';
-      audio.volume = 0.01;
-      const p = audio.play();
-      if (p) {
-        p.then(() => {
-          audio.pause();
-          audio.volume = 1;
-          audioElUnlockedRef.current = true;
-          console.log('[AudioPlayer] <audio> element unlocked');
-        }).catch((e) => {
-          console.warn('[AudioPlayer] <audio> unlock failed:', e.message);
-          audio.volume = 1;
-        });
-      }
-    }
-  }, []);
+    // Toca silêncio MP3 mínimo para desbloquear no iOS/Android
+    // Este é um MP3 válido de ~0.05s de silêncio
+    const SILENCE_MP3 = 'data:audio/mp3;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4Ljc2LjEwMAAAAAAAAAAAAAAA//tQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAABhgC7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7//////////////////////////////////////////////////////////////////8AAAAATGF2YzU4LjEzAAAAAAAAAAAAAAAAJAAAAAAAAAAAAYYoRwMHAAAAAAD/+1DEAAAH+ANoUAAABNQKbgzRQAIAAADSAAAAEBof5c/KAgCAIHygIAgfB8HwfB8oCAIAgCB8HwfB8HwfKAgCAIAgfB8HwfB8HygIAgCAIHwfB8HwfB8oCAIAgCB8HwfB8HwfKAgCAIAgfB8HwfB8HygIAgCAIHwfB8HwfB8oCAIAgCB8HwfB8HwfKAgCAIAgfB8HwfB8H/+1DEKYAAADSAMAAAAAAA0gAAAAAygIAgCAIHwfB8HwfB8oCAIAgCB8HwfB8HwfKAgCAIAgfB8HwfB8HygIAgCAIHwfB8HwfB8oCAIAgCB8HwfB8HwfKAgCAIAgfB8HwfB8HygIAgCAIHwfB8HwfB8oCAIAgCB8HwfB8HwfKAgCAIAgfB8HwfB8HygIAgCAIHw==';
 
-  /**
-   * Tenta reproduzir via AudioContext.
-   */
-  const playViaContext = useCallback((audioData: ArrayBuffer): Promise<boolean> => {
-    return new Promise((resolve) => {
-      const ctx = ctxRef.current;
-      if (!ctx || ctx.state !== 'running') {
-        resolve(false);
-        return;
-      }
-
-      const copy = audioData.slice(0);
-      ctx.decodeAudioData(copy).then((decoded) => {
-        const source = ctx.createBufferSource();
-        source.buffer = decoded;
-        source.connect(ctx.destination);
-        source.onended = () => resolve(true);
-        source.start(0);
-      }).catch((err) => {
-        console.warn('[AudioPlayer] decodeAudioData failed:', err);
-        resolve(false);
+    audio.src = SILENCE_MP3;
+    audio.volume = 0.01;
+    const p = audio.play();
+    if (p) {
+      p.then(() => {
+        audio!.pause();
+        audio!.volume = 1;
+        audio!.currentTime = 0;
+        initDoneRef.current = true;
+        console.log('[AudioPlayer] Unlocked');
+      }).catch((e) => {
+        console.warn('[AudioPlayer] Unlock failed:', e);
+        // Marca como done mesmo assim para não travar
+        audio!.volume = 1;
+        initDoneRef.current = true;
       });
-    });
+    } else {
+      initDoneRef.current = true;
+    }
   }, []);
 
-  /**
-   * Fallback: reproduz via <audio> element.
-   */
-  const playViaElement = useCallback((audioData: ArrayBuffer): Promise<boolean> => {
-    return new Promise((resolve) => {
-      const audio = audioElRef.current;
-      if (!audio) { resolve(false); return; }
-
-      const blob = new Blob([audioData], { type: 'audio/mpeg' });
-      const url = URL.createObjectURL(blob);
-
-      audio.onended = () => { URL.revokeObjectURL(url); resolve(true); };
-      audio.onerror = () => { URL.revokeObjectURL(url); resolve(false); };
-
-      audio.src = url;
-      audio.load();
-      audio.play().then(() => {
-        // Reproduzindo com sucesso
-      }).catch(() => {
-        URL.revokeObjectURL(url);
-        resolve(false);
-      });
-    });
-  }, []);
-
-  const playNext = useCallback(async () => {
+  const playNext = useCallback(() => {
     if (queueRef.current.length === 0) {
       playingRef.current = false;
       setIsPlaying(false);
@@ -149,24 +64,50 @@ export function useAudioPlayer() {
     playingRef.current = true;
     setIsPlaying(true);
 
+    const audio = audioRef.current;
+    if (!audio) {
+      playingRef.current = false;
+      setIsPlaying(false);
+      return;
+    }
+
     const audioData = queueRef.current.shift()!;
+    const blob = new Blob([audioData], { type: 'audio/mpeg' });
+    const url = URL.createObjectURL(blob);
 
-    // Tenta AudioContext primeiro
-    let played = await playViaContext(audioData);
+    const cleanup = () => {
+      URL.revokeObjectURL(url);
+      audio.onended = null;
+      audio.onerror = null;
+      audio.oncanplaythrough = null;
+    };
 
-    // Se falhou, tenta <audio> element
-    if (!played) {
-      console.log('[AudioPlayer] Falling back to <audio> element');
-      played = await playViaElement(audioData);
-    }
+    audio.onended = () => {
+      cleanup();
+      playNext();
+    };
 
-    if (!played) {
-      console.warn('[AudioPlayer] Both methods failed, skipping chunk');
-    }
+    audio.onerror = () => {
+      console.warn('[AudioPlayer] Error playing chunk, skipping');
+      cleanup();
+      playNext();
+    };
 
-    // Próximo da fila
-    playNext();
-  }, [playViaContext, playViaElement]);
+    audio.src = url;
+
+    // Espera o áudio estar pronto antes de dar play
+    audio.oncanplaythrough = () => {
+      audio.oncanplaythrough = null;
+      audio.play().catch((err) => {
+        console.warn('[AudioPlayer] play() failed:', err);
+        cleanup();
+        playNext();
+      });
+    };
+
+    // load() força o browser a processar o novo src
+    audio.load();
+  }, []);
 
   const enqueue = useCallback((audioData: ArrayBuffer) => {
     queueRef.current.push(audioData);
@@ -179,10 +120,10 @@ export function useAudioPlayer() {
     queueRef.current = [];
     playingRef.current = false;
     setIsPlaying(false);
-    const audio = audioElRef.current;
-    if (audio) {
-      audio.pause();
-      audio.removeAttribute('src');
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.removeAttribute('src');
+      audioRef.current.load();
     }
   }, []);
 
