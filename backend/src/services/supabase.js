@@ -66,7 +66,7 @@ export async function getLiveSessions() {
 }
 
 /**
- * Registra participação de aluno
+ * Registra participação de aluno (upsert, sem incrementar contador)
  */
 export async function joinSessionDB(sessionId, studentId, targetLanguage) {
   const { error } = await supabase
@@ -84,16 +84,11 @@ export async function joinSessionDB(sessionId, studentId, targetLanguage) {
 
   if (error) {
     console.warn('joinSessionDB warning:', error.message);
-    // Não lança erro — duplicate key é esperado em reconexões
-    return;
   }
-
-  // Incrementa contador de ouvintes
-  await supabase.rpc('increment_listeners', { sid: sessionId });
 }
 
 /**
- * Registra saída de aluno
+ * Registra saída de aluno (sem decrementar contador)
  */
 export async function leaveSessionDB(sessionId, studentId) {
   const { error } = await supabase
@@ -103,9 +98,18 @@ export async function leaveSessionDB(sessionId, studentId) {
     .eq('student_id', studentId);
 
   if (error) console.error('Erro ao registrar saída:', error.message);
+}
 
-  // Decrementa contador de ouvintes
-  await supabase.rpc('decrement_listeners', { sid: sessionId });
+/**
+ * Atualiza o listener_count no banco com o valor real do Map em memória
+ */
+export async function syncListenerCount(sessionId, count) {
+  const { error } = await supabase
+    .from('sessions')
+    .update({ listener_count: count })
+    .eq('id', sessionId);
+
+  if (error) console.error('syncListenerCount error:', error.message);
 }
 
 /**

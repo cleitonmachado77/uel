@@ -5,6 +5,7 @@ import {
   endSession,
   joinSessionDB,
   leaveSessionDB,
+  syncListenerCount,
   validateToken,
 } from '../services/supabase.js';
 
@@ -66,6 +67,8 @@ export function setupWebSocket(server) {
               listener.send(JSON.stringify({ type: 'session_ended' }));
             }
             activeSessions.delete(sessionId);
+            // Zera contador e encerra sessão
+            syncListenerCount(sessionId, 0).catch(() => {});
             await endSession(sessionId);
             console.log(`Session ${sessionId} ended`);
           }
@@ -73,6 +76,8 @@ export function setupWebSocket(server) {
           const session = activeSessions.get(sessionId);
           if (session) {
             session.listeners.delete(ws);
+            // Sincroniza contador com o número real de listeners
+            syncListenerCount(sessionId, session.listeners.size).catch(() => {});
             if (userId) await leaveSessionDB(sessionId, userId);
           }
         }
@@ -149,14 +154,16 @@ async function handleControlMessage(ws, msg, userId, setRole) {
       session.listeners.set(ws, { studentId, targetLang });
       setRole('student', msg.sessionId);
 
-      // Envia confirmação ANTES de persistir no DB (para não bloquear o aluno)
       ws.send(JSON.stringify({
         type: 'joined',
         professorName: session.professorName,
         subject: session.subject,
       }));
 
-      // Persiste participação em background (não bloqueia)
+      // Sincroniza contador com o número real de listeners
+      syncListenerCount(msg.sessionId, session.listeners.size).catch(() => {});
+
+      // Persiste participação em background
       if (studentId) {
         joinSessionDB(msg.sessionId, studentId, targetLang).catch((err) => {
           console.error('joinSessionDB error (non-fatal):', err.message);
