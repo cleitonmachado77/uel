@@ -101,6 +101,10 @@ export default function StudentPage() {
     // init DEVE rodar dentro do handler de clique (gesto do usuário) para desbloquear áudio no mobile
     initPlayer();
 
+    // Mostra o player imediatamente (melhor UX)
+    setConnected(true);
+    setCurrentSession(session);
+
     const connectWs = async () => {
       const ws = new WSClient({
         onMessage: (msg: WSMessage) => {
@@ -113,21 +117,21 @@ export default function StudentPage() {
           }
           if (msg.type === 'error') {
             console.error('[Student] WS error:', msg.message);
+            // Não desconecta por erro — pode ser erro não-fatal
           }
         },
         onAudio: (data: ArrayBuffer) => {
-          console.log('[Student] Audio received:', data.byteLength, 'bytes');
           enqueue(data);
         },
         onClose: () => {
           console.log('[Student] WebSocket closed');
-          // Só reconecta se ainda estiver na sessão
-          if (wsRef.current) {
-            console.log('[Student] Reconnecting in 3s...');
-            setTimeout(() => {
-              if (wsRef.current) connectWs();
-            }, 3000);
-          }
+          // Reconecta automaticamente enquanto wsRef existir
+          setTimeout(() => {
+            if (wsRef.current) {
+              console.log('[Student] Reconnecting...');
+              connectWs();
+            }
+          }, 2000);
         },
       });
 
@@ -141,21 +145,16 @@ export default function StudentPage() {
           token: authSession?.access_token || null,
           studentId: user?.id || null,
         });
-
-        // Só mostra o player após conexão bem-sucedida
-        setConnected(true);
-        setCurrentSession(session);
       } catch (err) {
         console.error('[Student] Failed to connect:', err);
-        // Tenta reconectar apenas se o usuário não saiu
-        if (wsRef.current !== null || !connected) {
-          wsRef.current = {} as any; // Marca como "tentando reconectar"
-          setTimeout(() => connectWs(), 3000);
-        }
+        // Reconecta
+        setTimeout(() => {
+          if (wsRef.current) connectWs();
+        }, 3000);
       }
     };
 
-    // Marca wsRef para permitir reconexão
+    // Marca wsRef como ativo para permitir reconexão
     wsRef.current = {} as any;
     await connectWs();
   };

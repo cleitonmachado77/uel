@@ -43,16 +43,16 @@ export class WSClient {
       this.ws = new WebSocket(getWsUrl());
       this.ws.binaryType = 'arraybuffer';
 
-      // Ping a cada 15s pra manter conexão viva (mobile fecha WebSocket idle)
+      // Ping a cada 10s pra manter conexão viva (mobile fecha WebSocket idle rapidamente)
       let pingInterval: ReturnType<typeof setInterval> | null = null;
 
       this.ws.onopen = () => {
-        console.log('WebSocket connected');
+        console.log('WebSocket connected to', getWsUrl());
         pingInterval = setInterval(() => {
           if (this.ws?.readyState === WebSocket.OPEN) {
             this.ws.send(JSON.stringify({ type: 'ping' }));
           }
-        }, 15000);
+        }, 10000);
         resolve();
       };
 

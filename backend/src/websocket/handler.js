@@ -52,7 +52,12 @@ export function setupWebSocket(server) {
       }
     });
 
-    ws.on('close', async () => {
+    ws.on('error', (err) => {
+      console.error(`WebSocket error: role=${role}, sessionId=${sessionId}, error=${err.message}`);
+    });
+
+    ws.on('close', async (code, reason) => {
+      console.log(`WebSocket closed: role=${role}, sessionId=${sessionId}, code=${code}, reason=${reason?.toString()}`);
       try {
         if (role === 'professor' && sessionId) {
           const session = activeSessions.get(sessionId);
@@ -144,16 +149,19 @@ async function handleControlMessage(ws, msg, userId, setRole) {
       session.listeners.set(ws, { studentId, targetLang });
       setRole('student', msg.sessionId);
 
-      // Persiste participação
-      if (studentId) {
-        await joinSessionDB(msg.sessionId, studentId, targetLang);
-      }
-
+      // Envia confirmação ANTES de persistir no DB (para não bloquear o aluno)
       ws.send(JSON.stringify({
         type: 'joined',
         professorName: session.professorName,
         subject: session.subject,
       }));
+
+      // Persiste participação em background (não bloqueia)
+      if (studentId) {
+        joinSessionDB(msg.sessionId, studentId, targetLang).catch((err) => {
+          console.error('joinSessionDB error (non-fatal):', err.message);
+        });
+      }
       break;
     }
 
