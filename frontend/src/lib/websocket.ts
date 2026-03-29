@@ -1,5 +1,23 @@
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:3001/ws';
 
+/**
+ * Garante que o protocolo WS corresponda ao protocolo da página.
+ * Páginas HTTPS exigem WSS — browsers mobile bloqueiam ws:// em contexto seguro.
+ */
+function getWsUrl(): string {
+  if (typeof window === 'undefined') return WS_URL;
+
+  // Se a página é HTTPS mas a URL do WS é ws://, converte para wss://
+  if (window.location.protocol === 'https:' && WS_URL.startsWith('ws://')) {
+    return WS_URL.replace('ws://', 'wss://');
+  }
+  // Se a página é HTTP mas a URL do WS é wss://, converte para ws://
+  if (window.location.protocol === 'http:' && WS_URL.startsWith('wss://')) {
+    return WS_URL.replace('wss://', 'ws://');
+  }
+  return WS_URL;
+}
+
 export type WSMessage = {
   type: string;
   [key: string]: unknown;
@@ -22,7 +40,7 @@ export class WSClient {
 
   connect(): Promise<void> {
     return new Promise((resolve, reject) => {
-      this.ws = new WebSocket(WS_URL);
+      this.ws = new WebSocket(getWsUrl());
       this.ws.binaryType = 'arraybuffer';
 
       // Ping a cada 15s pra manter conexão viva (mobile fecha WebSocket idle)

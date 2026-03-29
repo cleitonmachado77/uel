@@ -101,12 +101,10 @@ export default function StudentPage() {
     // init DEVE rodar dentro do handler de clique (gesto do usuário) para desbloquear áudio no mobile
     initPlayer();
 
-    setConnected(true);
-    setCurrentSession(session);
-
     const connectWs = async () => {
       const ws = new WSClient({
         onMessage: (msg: WSMessage) => {
+          console.log('[Student] WS message:', msg.type);
           if (msg.type === 'joined') {
             ws.send({ type: 'student_set_language', language: targetLang });
           }
@@ -114,30 +112,51 @@ export default function StudentPage() {
             leaveSession();
           }
           if (msg.type === 'error') {
-            console.error('WS error:', msg.message);
+            console.error('[Student] WS error:', msg.message);
           }
         },
         onAudio: (data: ArrayBuffer) => {
+          console.log('[Student] Audio received:', data.byteLength, 'bytes');
           enqueue(data);
         },
         onClose: () => {
-          console.log('WebSocket closed, reconnecting in 3s...');
-          setTimeout(() => {
-            if (wsRef.current) connectWs();
-          }, 3000);
+          console.log('[Student] WebSocket closed');
+          // Só reconecta se ainda estiver na sessão
+          if (wsRef.current) {
+            console.log('[Student] Reconnecting in 3s...');
+            setTimeout(() => {
+              if (wsRef.current) connectWs();
+            }, 3000);
+          }
         },
       });
 
       try {
         await ws.connect();
         wsRef.current = ws;
-        ws.send({ type: 'student_join', sessionId: session.id, token: authSession?.access_token, studentId: user?.id });
-      } catch {
-        console.error('Failed to connect, retrying in 3s...');
-        setTimeout(() => connectWs(), 3000);
+        console.log('[Student] Connected, sending student_join');
+        ws.send({
+          type: 'student_join',
+          sessionId: session.id,
+          token: authSession?.access_token || null,
+          studentId: user?.id || null,
+        });
+
+        // Só mostra o player após conexão bem-sucedida
+        setConnected(true);
+        setCurrentSession(session);
+      } catch (err) {
+        console.error('[Student] Failed to connect:', err);
+        // Tenta reconectar apenas se o usuário não saiu
+        if (wsRef.current !== null || !connected) {
+          wsRef.current = {} as any; // Marca como "tentando reconectar"
+          setTimeout(() => connectWs(), 3000);
+        }
       }
     };
 
+    // Marca wsRef para permitir reconexão
+    wsRef.current = {} as any;
     await connectWs();
   };
 
