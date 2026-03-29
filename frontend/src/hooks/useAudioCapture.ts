@@ -7,6 +7,7 @@ import { useRef, useState, useCallback } from 'react';
  * - Resume AudioContext suspenso (política mobile)
  * - Um recorder por ciclo (cada um gera WebM completo com header)
  * - Sem sobreposição: o próximo só inicia após o anterior parar
+ * - Rastreia pico de volume durante toda a gravação (não só no stop)
  */
 
 function getSupportedMimeType(): string {
@@ -61,17 +62,27 @@ export function useAudioCapture(onAudioChunk: (data: Blob) => void) {
     recorderRef.current = recorder;
 
     const chunks: Blob[] = [];
+    let peakVolume = 0;
+
+    // Amostra volume a cada 200ms durante a gravação
+    const volInterval = setInterval(() => {
+      const vol = getVolume();
+      if (vol > peakVolume) peakVolume = vol;
+    }, 200);
 
     recorder.ondataavailable = (e) => {
       if (e.data.size > 0) chunks.push(e.data);
     };
 
     recorder.onstop = () => {
+      clearInterval(volInterval);
       recorderRef.current = null;
-      const vol = getVolume();
-      if (chunks.length > 0 && vol > 0.04) {
+
+      console.log(`[AudioCapture] cycle done: chunks=${chunks.length}, peak=${peakVolume.toFixed(4)}`);
+
+      if (chunks.length > 0 && peakVolume > 0.01) {
         const blob = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' });
-        if (blob.size > 2000) {
+        if (blob.size > 1000) {
           onAudioChunk(blob);
         }
       }

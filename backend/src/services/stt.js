@@ -70,7 +70,7 @@ export async function transcribeAudio(audioBuffer, language = 'pt') {
     const confidence = alt?.confidence ?? 0;
 
     // Descarta transcrições com baixa confiança (ruído/silêncio interpretado como fala)
-    if (confidence < 0.6) {
+    if (confidence < 0.4) {
       console.log(`[STT/Deepgram] Low confidence (${confidence.toFixed(2)}), discarding: "${transcript}"`);
       return '';
     }
