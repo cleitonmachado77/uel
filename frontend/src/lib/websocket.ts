@@ -78,8 +78,16 @@ export class WSClient {
 
           // Áudio enviado como base64 dentro de JSON
           if (msg.type === 'audio' && msg.data) {
-            const binary = Uint8Array.from(atob(msg.data), c => c.charCodeAt(0));
-            this.handlers.onAudio?.(binary.buffer);
+            try {
+              const binaryStr = atob(msg.data as string);
+              const bytes = new Uint8Array(binaryStr.length);
+              for (let i = 0; i < binaryStr.length; i++) {
+                bytes[i] = binaryStr.charCodeAt(i);
+              }
+              this.handlers.onAudio?.(bytes.buffer);
+            } catch (e) {
+              console.warn('Failed to decode audio base64:', e);
+            }
             return;
           }
 

@@ -98,39 +98,29 @@ export default function StudentPage() {
   }, []);
 
   const joinSession = async (session: Session) => {
-    // init DEVE rodar dentro do handler de clique (gesto do usuário) para desbloquear áudio no mobile
-    initPlayer();
+    // Desbloqueia AudioContext DENTRO do gesto e AGUARDA ficar running
+    await initPlayer();
 
-    // Mostra o player imediatamente (melhor UX)
+    // Mostra o player
     setConnected(true);
     setCurrentSession(session);
 
     const connectWs = async () => {
       const ws = new WSClient({
         onMessage: (msg: WSMessage) => {
-          console.log('[Student] WS message:', msg.type);
           if (msg.type === 'joined') {
             ws.send({ type: 'student_set_language', language: targetLang });
           }
           if (msg.type === 'session_ended') {
             leaveSession();
           }
-          if (msg.type === 'error') {
-            console.error('[Student] WS error:', msg.message);
-            // Não desconecta por erro — pode ser erro não-fatal
-          }
         },
         onAudio: (data: ArrayBuffer) => {
           enqueue(data);
         },
         onClose: () => {
-          console.log('[Student] WebSocket closed');
-          // Reconecta automaticamente enquanto wsRef existir
           setTimeout(() => {
-            if (wsRef.current) {
-              console.log('[Student] Reconnecting...');
-              connectWs();
-            }
+            if (wsRef.current) connectWs();
           }, 2000);
         },
       });
@@ -138,7 +128,6 @@ export default function StudentPage() {
       try {
         await ws.connect();
         wsRef.current = ws;
-        console.log('[Student] Connected, sending student_join');
         ws.send({
           type: 'student_join',
           sessionId: session.id,
@@ -146,8 +135,7 @@ export default function StudentPage() {
           studentId: user?.id || null,
         });
       } catch (err) {
-        console.error('[Student] Failed to connect:', err);
-        // Reconecta
+        console.error('[Student] Connect failed:', err);
         setTimeout(() => {
           if (wsRef.current) connectWs();
         }, 3000);
