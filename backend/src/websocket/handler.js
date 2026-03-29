@@ -151,6 +151,16 @@ async function handleControlMessage(ws, msg, userId, setRole) {
       const studentId = userId || msg.studentId;
       const targetLang = msg.language || 'en';
 
+      // Remove listener anterior do mesmo aluno (reconexão ou duplicata)
+      if (studentId) {
+        for (const [existingWs, info] of session.listeners) {
+          if (info.studentId === studentId && existingWs !== ws) {
+            session.listeners.delete(existingWs);
+            break;
+          }
+        }
+      }
+
       session.listeners.set(ws, { studentId, targetLang });
       setRole('student', msg.sessionId);
 
@@ -198,7 +208,6 @@ async function handleAudioData(sessionId, audioBuffer) {
   const session = activeSessions.get(sessionId);
   if (!session || session.listeners.size === 0) return;
 
-  // Cada chunk já é um WebM completo de ~3s (gerado pelo frontend)
   // Chunks muito pequenos são silêncio/ruído — descarta
   if (audioBuffer.length < 5000) return;
 
@@ -224,34 +233,26 @@ async function handleAudioData(sessionId, audioBuffer) {
     return;
   }
 
-  // Agrupa listeners por idioma alvo
-  const byLanguage = new Map();
-  for (const [ws, info] of session.listeners) {
+  // Coleta idiomas únicos necessários AGORA
+  const neededLangs = new Set();
+  for (const [, info] of session.listeners) {
     const lang = info.targetLang || 'en';
-    if (!byLanguage.has(lang)) byLanguage.set(lang, []);
-    byLanguage.get(lang).push(ws);
+    if (lang !== session.language) neededLangs.add(lang);
   }
 
   // 2. Translate + TTS em paralelo por idioma (reutiliza o transcript)
-  const tasks = [...byLanguage.entries()].map(async ([targetLang, listeners]) => {
-    try {
-      // Mesmo idioma: não precisa traduzir/sintetizar
-      if (targetLang === session.language) return;
+  // Armazena resultado por idioma
+  const audioByLang = new Map();
 
+  const tasks = [...neededLangs].map(async (targetLang) => {
+    try {
       const translatedAudio = await translateAndSpeak(
         transcript,
         session.language,
         targetLang
       );
-
       if (translatedAudio) {
-        const audioBase64 = Buffer.from(translatedAudio).toString('base64');
-        const audioMsg = JSON.stringify({ type: 'audio', data: audioBase64 });
-        for (const listener of listeners) {
-          if (listener.readyState === 1) {
-            listener.send(audioMsg);
-          }
-        }
+        audioByLang.set(targetLang, translatedAudio);
       }
     } catch (err) {
       console.error(`Pipeline error for ${targetLang}:`, err.message);
@@ -259,6 +260,19 @@ async function handleAudioData(sessionId, audioBuffer) {
   });
 
   await Promise.all(tasks);
+
+  // 3. Envia para cada listener com base no idioma ATUAL (pode ter mudado durante o pipeline)
+  for (const [ws, info] of session.listeners) {
+    const lang = info.targetLang || 'en';
+    if (lang === session.language) continue;
+
+    const audio = audioByLang.get(lang);
+    if (audio && ws.readyState === 1) {
+      const audioBase64 = Buffer.from(audio).toString('base64');
+      ws.send(JSON.stringify({ type: 'audio', data: audioBase64 }));
+    }
+  }
+
   session._processing = false;
 }
 
