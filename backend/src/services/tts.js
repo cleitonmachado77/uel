@@ -79,7 +79,7 @@ export async function synthesizeSpeech(text, language = 'en') {
           sampleRateHertz: 24000,
         },
         talkingSpeed: 0.85,
-        temperature: 0.9,          // Inworld recomenda 0.8–1.0 para real-time
+        temperature: 0.8,          // Inworld recomenda 0.8–1.0 para real-time
         applyTextNormalization: 'ON',
       }),
     });

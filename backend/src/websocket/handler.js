@@ -202,6 +202,13 @@ async function handleAudioData(sessionId, audioBuffer) {
   // Chunks muito pequenos são silêncio/ruído — descarta
   if (audioBuffer.length < 5000) return;
 
+  // Evita acúmulo: se o pipeline anterior ainda está rodando, descarta este chunk
+  if (session._processing) {
+    console.log('[Handler] Pipeline busy, dropping chunk');
+    return;
+  }
+  session._processing = true;
+
   // Agrupa listeners por idioma alvo
   const byLanguage = new Map();
   for (const [ws, info] of session.listeners) {
@@ -210,7 +217,8 @@ async function handleAudioData(sessionId, audioBuffer) {
     byLanguage.get(lang).push(ws);
   }
 
-  for (const [targetLang, listeners] of byLanguage) {
+  // Processa todos os idiomas em paralelo
+  const tasks = [...byLanguage.entries()].map(async ([targetLang, listeners]) => {
     try {
       const translatedAudio = await processAudioPipeline(
         audioBuffer,
@@ -219,7 +227,6 @@ async function handleAudioData(sessionId, audioBuffer) {
       );
 
       if (translatedAudio) {
-        // Envia como JSON com base64 para máxima compatibilidade com proxies/mobile
         const audioBase64 = Buffer.from(translatedAudio).toString('base64');
         const audioMsg = JSON.stringify({ type: 'audio', data: audioBase64 });
         for (const listener of listeners) {
@@ -231,7 +238,10 @@ async function handleAudioData(sessionId, audioBuffer) {
     } catch (err) {
       console.error(`Pipeline error for ${targetLang}:`, err.message);
     }
-  }
+  });
+
+  await Promise.all(tasks);
+  session._processing = false;
 }
 
 function tryParseJSON(data) {
