@@ -1,5 +1,5 @@
 import { WebSocketServer } from 'ws';
-import { processAudioPipeline } from '../services/pipeline.js';
+import { transcribeChunk, translateAndSpeak } from '../services/pipeline.js';
 import {
   createSession,
   endSession,
@@ -209,6 +209,21 @@ async function handleAudioData(sessionId, audioBuffer) {
   }
   session._processing = true;
 
+  // 1. STT uma vez só para o chunk
+  let transcript;
+  try {
+    transcript = await transcribeChunk(audioBuffer, session.language);
+  } catch (err) {
+    console.error('STT error:', err.message);
+    session._processing = false;
+    return;
+  }
+
+  if (!transcript) {
+    session._processing = false;
+    return;
+  }
+
   // Agrupa listeners por idioma alvo
   const byLanguage = new Map();
   for (const [ws, info] of session.listeners) {
@@ -217,11 +232,14 @@ async function handleAudioData(sessionId, audioBuffer) {
     byLanguage.get(lang).push(ws);
   }
 
-  // Processa todos os idiomas em paralelo
+  // 2. Translate + TTS em paralelo por idioma (reutiliza o transcript)
   const tasks = [...byLanguage.entries()].map(async ([targetLang, listeners]) => {
     try {
-      const translatedAudio = await processAudioPipeline(
-        audioBuffer,
+      // Mesmo idioma: não precisa traduzir/sintetizar
+      if (targetLang === session.language) return;
+
+      const translatedAudio = await translateAndSpeak(
+        transcript,
         session.language,
         targetLang
       );

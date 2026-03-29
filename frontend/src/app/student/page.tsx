@@ -169,6 +169,7 @@ export default function StudentPage() {
   const changeLanguage = (lang: string) => {
     setTargetLang(lang);
     targetLangRef.current = lang;
+    stopPlayer(); // Limpa fila de áudio do idioma anterior
     wsRef.current?.send({ type: 'student_set_language', language: lang });
   };
 
