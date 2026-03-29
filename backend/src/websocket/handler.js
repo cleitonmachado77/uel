@@ -211,9 +211,12 @@ async function handleAudioData(sessionId, audioBuffer) {
       );
 
       if (translatedAudio) {
+        // Envia como JSON com base64 para máxima compatibilidade com proxies/mobile
+        const audioBase64 = Buffer.from(translatedAudio).toString('base64');
+        const audioMsg = JSON.stringify({ type: 'audio', data: audioBase64 });
         for (const listener of listeners) {
           if (listener.readyState === 1) {
-            listener.send(translatedAudio);
+            listener.send(audioMsg);
           }
         }
       }

@@ -59,7 +59,7 @@ export class WSClient {
       this.ws.onmessage = (event) => {
         const data = event.data;
 
-        // Binário: pode ser ArrayBuffer ou Blob dependendo do browser/mobile
+        // Binário direto (legacy/fallback)
         if (data instanceof ArrayBuffer) {
           this.handlers.onAudio?.(data);
           return;
@@ -75,9 +75,17 @@ export class WSClient {
         try {
           const msg = JSON.parse(data);
           if (msg.type === 'pong') return;
+
+          // Áudio enviado como base64 dentro de JSON
+          if (msg.type === 'audio' && msg.data) {
+            const binary = Uint8Array.from(atob(msg.data), c => c.charCodeAt(0));
+            this.handlers.onAudio?.(binary.buffer);
+            return;
+          }
+
           this.handlers.onMessage?.(msg);
         } catch {
-          console.warn('Unparseable message:', data);
+          console.warn('Unparseable message:', typeof data);
         }
       };
 
