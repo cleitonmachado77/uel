@@ -2,57 +2,48 @@
 import { useRef, useCallback, useState } from 'react';
 
 /**
- * Player de áudio compatível com mobile (iOS Safari / Android Chrome).
+ * Player de áudio para mobile usando Web Audio API (AudioContext + decodeAudioData).
  *
- * Estratégia:
- * - Usa um único elemento <audio> persistente, criado e "aquecido" no gesto do usuário (init).
- * - No iOS, trocar o `src` e chamar `play()` fora de um gesto bloqueia.  Para contornar,
- *   usamos a técnica de manter o elemento sempre "quente": no init() tocamos um silêncio
- *   inline (data-URI) que desbloqueia o elemento para plays futuros via código.
- * - Fila de reprodução garante ordem e evita sobreposição.
+ * Por que não usar <audio> element:
+ * - iOS Safari bloqueia .play() em <audio> fora de gesto do usuário, MESMO após unlock
+ * - Trocar .src e chamar .play() assincronamente (via WebSocket) é tratado como novo autoplay
+ * - Web Audio API, uma vez desbloqueada com resume() no gesto, permite playback livre via código
  */
 export function useAudioPlayer() {
   const [isPlaying, setIsPlaying] = useState(false);
-  const queueRef = useRef<string[]>([]);
+  const queueRef = useRef<ArrayBuffer[]>([]);
   const playingRef = useRef(false);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-  const unlockedRef = useRef(false);
+  const ctxRef = useRef<AudioContext | null>(null);
 
   /**
    * DEVE ser chamado dentro de um handler de clique/toque do usuário.
-   * Cria o <audio> e toca um silêncio para desbloquear autoplay no mobile.
+   * Cria e desbloqueia o AudioContext.
    */
   const init = useCallback(() => {
-    if (!audioRef.current) {
-      const audio = document.createElement('audio');
-      audio.setAttribute('playsinline', 'true');
-      audio.setAttribute('webkit-playsinline', 'true');
-      // Previne que o iOS pause música de fundo
-      (audio as any).playsInline = true;
-      audioRef.current = audio;
+    if (!ctxRef.current) {
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      ctxRef.current = new AudioCtx();
     }
 
-    // Toca silêncio mínimo para desbloquear o elemento no iOS/Android
-    if (!unlockedRef.current) {
-      const audio = audioRef.current;
-      // WAV PCM silencioso de ~100ms (44 bytes de header + dados zerados)
-      const silenceDataUri =
-        'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=';
-      audio.src = silenceDataUri;
-      audio.volume = 0;
-      const p = audio.play();
-      if (p) {
-        p.then(() => {
-          audio.pause();
-          audio.volume = 1;
-          audio.currentTime = 0;
-          unlockedRef.current = true;
-          console.log('[AudioPlayer] Unlocked for mobile playback');
-        }).catch((e) => {
-          console.warn('[AudioPlayer] Unlock play failed:', e);
-          // Mesmo falhando, marcamos como tentado para não travar
-          audio.volume = 1;
-        });
+    const ctx = ctxRef.current;
+
+    // Resume é obrigatório no gesto do usuário para iOS/Android
+    if (ctx.state === 'suspended') {
+      ctx.resume().then(() => {
+        console.log('[AudioPlayer] AudioContext resumed');
+      }).catch(() => {});
+    }
+
+    // Toca um buffer vazio para garantir que o contexto está realmente ativo no iOS
+    if (ctx.state === 'running' || ctx.state === 'suspended') {
+      try {
+        const silentBuffer = ctx.createBuffer(1, 1, ctx.sampleRate);
+        const source = ctx.createBufferSource();
+        source.buffer = silentBuffer;
+        source.connect(ctx.destination);
+        source.start(0);
+      } catch {
+        // ignora
       }
     }
   }, []);
@@ -64,69 +55,77 @@ export function useAudioPlayer() {
       return;
     }
 
-    playingRef.current = true;
-    setIsPlaying(true);
-
-    const blobUrl = queueRef.current.shift()!;
-    const audio = audioRef.current;
-    if (!audio) {
-      URL.revokeObjectURL(blobUrl);
+    const ctx = ctxRef.current;
+    if (!ctx) {
       playingRef.current = false;
       setIsPlaying(false);
       return;
     }
 
-    audio.onended = () => {
-      URL.revokeObjectURL(blobUrl);
-      playNext();
-    };
-    audio.onerror = () => {
-      console.warn('[AudioPlayer] Playback error, skipping chunk');
-      URL.revokeObjectURL(blobUrl);
-      playNext();
-    };
-
-    // Atribui src e tenta play
-    audio.src = blobUrl;
-    // load() força o mobile a reconhecer a nova source
-    audio.load();
-
-    const playPromise = audio.play();
-    if (playPromise) {
-      playPromise.catch((err) => {
-        console.warn('[AudioPlayer] play() rejected:', err.message);
-        // Em mobile, se autoplay falhar, tentamos novamente após um pequeno delay
-        // (às vezes o browser precisa de um tick para processar o load)
-        setTimeout(() => {
-          audio.play().catch(() => {
-            // Se falhar de novo, descarta e segue
-            URL.revokeObjectURL(blobUrl);
-            playNext();
-          });
-        }, 100);
-      });
+    // Garante que o contexto está ativo
+    if (ctx.state === 'suspended') {
+      ctx.resume().catch(() => {});
     }
+
+    playingRef.current = true;
+    setIsPlaying(true);
+
+    const audioData = queueRef.current.shift()!;
+
+    // decodeAudioData precisa de uma cópia do buffer (ele "consome" o ArrayBuffer)
+    const copy = audioData.slice(0);
+
+    ctx.decodeAudioData(
+      copy,
+      (decodedBuffer) => {
+        const source = ctx.createBufferSource();
+        source.buffer = decodedBuffer;
+        source.connect(ctx.destination);
+        source.onended = () => {
+          playNext();
+        };
+        source.start(0);
+      },
+      (err) => {
+        console.warn('[AudioPlayer] decodeAudioData failed:', err);
+        // Se falhar decode, tenta fallback com <audio> element
+        playWithFallback(audioData).then(() => playNext()).catch(() => playNext());
+      }
+    );
+  }, []);
+
+  /**
+   * Fallback: usa <audio> element para formatos que o AudioContext não decodifica.
+   */
+  const playWithFallback = useCallback((audioData: ArrayBuffer): Promise<void> => {
+    return new Promise((resolve) => {
+      try {
+        const blob = new Blob([audioData], { type: 'audio/mpeg' });
+        const url = URL.createObjectURL(blob);
+        const audio = new Audio();
+        audio.setAttribute('playsinline', 'true');
+        audio.src = url;
+        audio.onended = () => { URL.revokeObjectURL(url); resolve(); };
+        audio.onerror = () => { URL.revokeObjectURL(url); resolve(); };
+        audio.play().catch(() => { URL.revokeObjectURL(url); resolve(); });
+      } catch {
+        resolve();
+      }
+    });
   }, []);
 
   const enqueue = useCallback((audioData: ArrayBuffer) => {
-    const blob = new Blob([audioData], { type: 'audio/mpeg' });
-    const url = URL.createObjectURL(blob);
-    queueRef.current.push(url);
+    queueRef.current.push(audioData);
     if (!playingRef.current) {
       playNext();
     }
   }, [playNext]);
 
   const stop = useCallback(() => {
-    queueRef.current.forEach(URL.revokeObjectURL);
     queueRef.current = [];
     playingRef.current = false;
     setIsPlaying(false);
-    if (audioRef.current) {
-      audioRef.current.pause();
-      audioRef.current.removeAttribute('src');
-      audioRef.current.load();
-    }
+    // Não fecha o AudioContext — ele será reutilizado
   }, []);
 
   return { isPlaying, enqueue, stop, init };

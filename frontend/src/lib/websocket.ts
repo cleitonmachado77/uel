@@ -39,16 +39,27 @@ export class WSClient {
       };
 
       this.ws.onmessage = (event) => {
-        if (event.data instanceof ArrayBuffer) {
-          this.handlers.onAudio?.(event.data);
-        } else {
-          try {
-            const msg = JSON.parse(event.data);
-            if (msg.type === 'pong') return; // Ignora pong
-            this.handlers.onMessage?.(msg);
-          } catch {
-            console.warn('Unparseable message:', event.data);
-          }
+        const data = event.data;
+
+        // Binário: pode ser ArrayBuffer ou Blob dependendo do browser/mobile
+        if (data instanceof ArrayBuffer) {
+          this.handlers.onAudio?.(data);
+          return;
+        }
+        if (data instanceof Blob) {
+          data.arrayBuffer().then((buf) => {
+            this.handlers.onAudio?.(buf);
+          });
+          return;
+        }
+
+        // Texto (JSON)
+        try {
+          const msg = JSON.parse(data);
+          if (msg.type === 'pong') return;
+          this.handlers.onMessage?.(msg);
+        } catch {
+          console.warn('Unparseable message:', data);
         }
       };
 
