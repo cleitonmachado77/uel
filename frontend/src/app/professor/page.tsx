@@ -28,16 +28,22 @@ export default function ProfessorPage() {
       .then(({ data }) => {
         if (data) {
           setProfessorName(data.name);
-          setAvatarUrl(data.avatar_url);
+          // Adiciona cache-busting para garantir que a imagem mais recente seja exibida
+          setAvatarUrl(data.avatar_url ? `${data.avatar_url}?t=${Date.now()}` : null);
         }
       });
   }, [user]);
 
   const onAudioChunk = useCallback((blob: Blob) => {
     blob.arrayBuffer().then((buf) => {
-      // Envia mimeType junto para o backend configurar o Deepgram corretamente
-      const b64 = btoa(String.fromCharCode(...new Uint8Array(buf)));
-      wsRef.current?.send({ type: 'audio_chunk', mimeType: blob.type || 'audio/webm', data: b64 });
+      const bytes = new Uint8Array(buf);
+      // btoa em chunks para evitar stack overflow em buffers grandes
+      let b64 = '';
+      const chunkSize = 8192;
+      for (let i = 0; i < bytes.length; i += chunkSize) {
+        b64 += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+      }
+      wsRef.current?.send({ type: 'audio_chunk', data: btoa(b64) });
     });
   }, []);
 

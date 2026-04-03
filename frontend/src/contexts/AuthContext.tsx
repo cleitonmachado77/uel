@@ -128,10 +128,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   async function signIn(email: string, password: string) {
-    console.time('signIn-total');
-    console.time('signIn-auth');
     const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-    console.timeEnd('signIn-auth');
     if (error) throw error;
     if (data.user && data.session) {
       setState({ user: data.user, session: data.session, loading: false, role: null });
@@ -139,7 +136,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setState((s) => ({ ...s, role }));
       }).catch(() => {});
     }
-    console.timeEnd('signIn-total');
   }
 
   async function signOut() {

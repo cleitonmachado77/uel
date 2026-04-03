@@ -25,7 +25,7 @@ export default function ProfilePage() {
         if (data) {
           setName(data.name);
           setAvatarUrl(data.avatar_url);
-          setPreview(data.avatar_url);
+          setPreview(data.avatar_url ? `${data.avatar_url}?t=${Date.now()}` : null);
           if (data.locale) setSelectedLocale(data.locale as Locale);
         }
       });
@@ -41,7 +41,8 @@ export default function ProfilePage() {
 
       if (avatarFile) {
         const ext = avatarFile.name.split('.').pop();
-        const path = `${user.id}/avatar.${ext}`;
+        // Inclui timestamp no path para garantir URL nova a cada upload (evita cache do CDN)
+        const path = `${user.id}/avatar_${Date.now()}.${ext}`;
         const { error: upErr } = await supabase.storage
           .from('avatars').upload(path, avatarFile, { upsert: true });
         if (!upErr) {
@@ -63,6 +64,8 @@ export default function ProfilePage() {
 
       setMessage(t('profile.saved'));
       setAvatarUrl(newAvatarUrl);
+      setPreview(newAvatarUrl ? `${newAvatarUrl}?t=${Date.now()}` : null);
+      setAvatarFile(null);
     } catch (err: unknown) {
       setMessage(err instanceof Error ? err.message : 'Erro ao salvar');
     } finally {

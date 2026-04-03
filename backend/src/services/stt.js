@@ -1,9 +1,5 @@
 /**
- * Speech-to-Text usando Deepgram Live Streaming (Nova-3)
- * https://developers.deepgram.com/docs/getting-started-with-live-streaming-audio
- *
- * Modo streaming com interim_results para reduzir latência.
- * Cada sessão de professor mantém uma conexão WebSocket persistente com Deepgram.
+ * Speech-to-Text usando Deepgram Live Streaming (Nova-2)
  */
 
 import { WebSocket } from 'ws';
@@ -24,13 +20,9 @@ const LANG_CODES = {
 
 /**
  * Cria uma conexão de streaming com Deepgram.
- * Retorna um objeto com métodos para enviar áudio e fechar a conexão.
- *
- * @param {string} language - código de idioma (pt, en, es...)
- * @param {function} onTranscript - callback(transcript: string, isFinal: boolean)
- * @param {function} onError - callback(err: Error)
+ * NÃO passa encoding na URL — o Deepgram detecta automaticamente pelo container WebM.
  */
-export function createDeepgramStream(language = 'pt', encoding, onTranscript, onError) {
+export function createDeepgramStream(language = 'pt', onTranscript, onError) {
   const langCode = LANG_CODES[language] || 'pt-BR';
 
   const params = new URLSearchParams({
@@ -38,13 +30,10 @@ export function createDeepgramStream(language = 'pt', encoding, onTranscript, on
     language: langCode,
     punctuate: 'true',
     interim_results: 'true',
-    endpointing: '300',
-    utterance_end_ms: '1000',
+    endpointing: '150',       // 150ms de silêncio para finalizar (padrão é 10ms)
+    utterance_end_ms: '1000', // mínimo suportado pela API é 1000ms
     vad_events: 'true',
   });
-
-  // Informa o encoding ao Deepgram se conhecido — melhora reconhecimento
-  if (encoding) params.set('encoding', encoding);
 
   const url = `wss://api.deepgram.com/v1/listen?${params.toString()}`;
   console.log(`[STT/Deepgram] Conectando: ${url}`);
@@ -56,14 +45,13 @@ export function createDeepgramStream(language = 'pt', encoding, onTranscript, on
   let isOpen = false;
   let pendingChunks = [];
   let lastAudioAt = Date.now();
+  let closed = false;
 
-  // Keepalive: envia KeepAlive JSON a cada 5s para evitar timeout do Deepgram (10s)
   const keepaliveInterval = setInterval(() => {
-    if (!isOpen) return;
+    if (!isOpen || closed) return;
     const idleMs = Date.now() - lastAudioAt;
     if (idleMs >= 4000) {
       ws.send(JSON.stringify({ type: 'KeepAlive' }));
-      console.log('[STT/Deepgram] KeepAlive enviado');
     }
   }, 5000);
 
@@ -84,25 +72,13 @@ export function createDeepgramStream(language = 'pt', encoding, onTranscript, on
         const isFinal = msg.is_final === true;
         const confidence = alt?.confidence ?? 0;
 
-        console.log(`[STT/Deepgram] Results: isFinal=${isFinal} confidence=${confidence.toFixed(2)} transcript="${transcript}"`);
-
         if (!transcript || transcript.length < 2) return;
-
-        // Para interinos, exige confiança alta (evita ruído mas não descarta fala real)
         if (!isFinal && confidence < 0.85) return;
 
         const cleaned = transcript.replace(/[.,!?;:\-–—…\s]/g, '');
         if (cleaned.length < 2) return;
 
         onTranscript(transcript, isFinal);
-      }
-
-      if (msg.type === 'SpeechStarted') {
-        console.log('[STT/Deepgram] Fala detectada');
-      }
-
-      if (msg.type === 'UtteranceEnd') {
-        console.log('[STT/Deepgram] UtteranceEnd recebido');
       }
     } catch (err) {
       console.error('[STT/Deepgram] Parse error:', err.message);
@@ -116,16 +92,14 @@ export function createDeepgramStream(language = 'pt', encoding, onTranscript, on
 
   ws.on('close', (code, reason) => {
     isOpen = false;
+    closed = true;
     clearInterval(keepaliveInterval);
     console.log(`[STT/Deepgram] Stream fechado code=${code} reason=${reason?.toString()}`);
   });
 
   return {
-    /**
-     * Envia chunk de áudio para o Deepgram.
-     * @param {Buffer} audioBuffer
-     */
     send(audioBuffer) {
+      if (closed) return;
       lastAudioAt = Date.now();
       if (isOpen) {
         ws.send(audioBuffer);
@@ -134,53 +108,49 @@ export function createDeepgramStream(language = 'pt', encoding, onTranscript, on
       }
     },
 
-    /**
-     * Sinaliza fim de stream para o Deepgram e fecha a conexão.
-     */
     close() {
+      if (closed) return;
+      closed = true;
       clearInterval(keepaliveInterval);
       if (isOpen) {
-        ws.send(JSON.stringify({ type: 'CloseStream' }));
-        setTimeout(() => ws.terminate(), 1000);
+        try { ws.send(JSON.stringify({ type: 'CloseStream' })); } catch (_) {}
+        setTimeout(() => { try { ws.terminate(); } catch (_) {} }, 1000);
       } else {
-        ws.terminate();
+        try { ws.terminate(); } catch (_) {}
       }
     },
 
     get readyState() {
       return ws.readyState;
     },
+
+    get isClosed() {
+      return closed;
+    },
   };
 }
 
 /**
- * Mantém compatibilidade com o modo batch (usado em stt-translate.js).
- * Faz uma transcrição única via REST para casos pontuais.
+ * Transcrição única via REST (usado em stt-translate.js).
  */
 export async function transcribeAudio(audioBuffer, language = 'pt') {
   if (audioBuffer.length < 1000) return '';
 
   const langCode = LANG_CODES[language] || 'pt-BR';
-
-  // Detecta content-type pelo magic number
   const buf = Buffer.from(audioBuffer);
   let contentType = 'audio/webm';
-  if (buf.length >= 4 && buf[0] === 0x1a && buf[1] === 0x45) contentType = 'audio/webm';
-  else if (buf.length >= 8 && buf.toString('ascii', 4, 8) === 'ftyp') contentType = 'audio/mp4';
+  if (buf.length >= 8 && buf.toString('ascii', 4, 8) === 'ftyp') contentType = 'audio/mp4';
   else if (buf.length >= 4 && buf.toString('ascii', 0, 4) === 'OggS') contentType = 'audio/ogg';
 
   const url = new URL('https://api.deepgram.com/v1/listen');
-  url.searchParams.set('model', 'nova-3');
+  url.searchParams.set('model', 'nova-2');
   url.searchParams.set('language', langCode);
   url.searchParams.set('punctuate', 'true');
 
   try {
     const response = await fetch(url.toString(), {
       method: 'POST',
-      headers: {
-        Authorization: `Token ${DEEPGRAM_API_KEY}`,
-        'Content-Type': contentType,
-      },
+      headers: { Authorization: `Token ${DEEPGRAM_API_KEY}`, 'Content-Type': contentType },
       body: buf,
     });
 
@@ -194,7 +164,6 @@ export async function transcribeAudio(audioBuffer, language = 'pt') {
     const alt = data.results?.channels?.[0]?.alternatives?.[0];
     const transcript = alt?.transcript || '';
     const confidence = alt?.confidence ?? 0;
-
     if (confidence < 0.4) return '';
     return transcript.trim();
   } catch (err) {

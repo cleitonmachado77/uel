@@ -1,6 +1,7 @@
 import { WebSocketServer } from "ws";
 import { createDeepgramStream } from "../services/stt.js";
 import { translateAndSpeak } from "../services/pipeline.js";
+import { synthesizeSpeech } from "../services/tts.js";
 import { createSession, endSession, joinSessionDB, leaveSessionDB, syncListenerCount, validateToken } from "../services/supabase.js";
 
 const activeSessions = new Map();
@@ -11,6 +12,7 @@ export function setupWebSocket(server) {
   const wss = new WebSocketServer({ server, path: "/ws" });
   wss.on("connection", (ws) => {
     let role = null, sessionId = null, userId = null;
+
     ws.on("message", async (data) => {
       try {
         const msg = tryParseJSON(data);
@@ -20,27 +22,35 @@ export function setupWebSocket(server) {
           }
           if (!userId && msg.professorId) userId = msg.professorId;
           if (!userId && msg.studentId) userId = msg.studentId;
+
           if (msg.type === "audio_chunk" && role === "professor" && sessionId) {
-            handleAudioData(sessionId, Buffer.from(msg.data, "base64"), msg.mimeType);
+            handleAudioData(sessionId, Buffer.from(msg.data, "base64"));
             return;
           }
           await handleControlMessage(ws, msg, userId, (r, s) => { role = r; sessionId = s; });
         } else if (role === "professor" && sessionId) {
-          handleAudioData(sessionId, data, null);
+          handleAudioData(sessionId, data);
         }
       } catch (err) {
         console.error("WebSocket message error:", err.message);
         ws.send(JSON.stringify({ type: "error", message: err.message }));
       }
     });
+
     ws.on("error", (err) => console.error(`WebSocket error: role=${role}, sessionId=${sessionId}, error=${err.message}`));
+
     ws.on("close", async (code) => {
       console.log(`WebSocket closed: role=${role}, sessionId=${sessionId}, code=${code}`);
       try {
-        if (role === "professor" && sessionId) { await closeSession(sessionId); }
-        else if (role === "student" && sessionId) {
+        if (role === "professor" && sessionId) {
+          await closeSession(sessionId);
+        } else if (role === "student" && sessionId) {
           const s = activeSessions.get(sessionId);
-          if (s) { s.listeners.delete(ws); syncListenerCount(sessionId, s.listeners.size).catch(() => {}); if (userId) await leaveSessionDB(sessionId, userId); }
+          if (s) {
+            s.listeners.delete(ws);
+            syncListenerCount(sessionId, s.listeners.size).catch(() => {});
+            if (userId) await leaveSessionDB(sessionId, userId);
+          }
         }
       } catch (err) { console.error("Close handler error:", err.message); }
     });
@@ -48,28 +58,29 @@ export function setupWebSocket(server) {
   console.log("WebSocket server ready");
 }
 
-function mimeToEncoding(mimeType) {
-  if (!mimeType) return null;
-  if (mimeType.includes("webm")) return "webm-opus";
-  if (mimeType.includes("mp4") || mimeType.includes("aac")) return "aac";
-  if (mimeType.includes("ogg")) return "ogg-opus";
-  return null;
-}
-
-function openDeepgramStream(sessionId, encoding) {
+function openDeepgramStream(sessionId) {
   const session = activeSessions.get(sessionId);
-  if (!session) return;
-  if (session.dgStream) { try { session.dgStream.close(); } catch (_) {} session.dgStream = null; }
+  if (!session || session.dgBlocked) return;
+
+  if (session.dgStream) {
+    try { session.dgStream.close(); } catch (_) {}
+    session.dgStream = null;
+  }
+
   session.dgStream = createDeepgramStream(
-    session.language, encoding || null,
+    session.language,
     (transcript, isFinal) => onTranscript(sessionId, transcript, isFinal),
     (err) => {
       console.error(`[Session ${sessionId}] DG error:`, err.message);
+      session.dgStream = null;
       if (err.message && err.message.includes("400")) {
-        console.error(`[Session ${sessionId}] Erro 400 - nao reconectando`);
+        console.error(`[Session ${sessionId}] Erro 400 - verifique a API key do Deepgram`);
+        session.dgBlocked = true; // bloqueia reconexão
         return;
       }
-      setTimeout(() => { if (activeSessions.has(sessionId)) openDeepgramStream(sessionId, session.encoding); }, 500);
+      setTimeout(() => {
+        if (activeSessions.has(sessionId)) openDeepgramStream(sessionId);
+      }, 1000);
     }
   );
 }
@@ -83,7 +94,17 @@ async function closeSession(sessionId) {
   syncListenerCount(sessionId, 0).catch(() => {});
   await endSession(sessionId);
   console.log(`[Session ${sessionId}] encerrada`);
-  setTimeout(() => { if (lingeringSessions.has(sessionId)) { notifySessionEnded(sessionId); lingeringSessions.delete(sessionId); } }, 4000);
+  setTimeout(() => {
+    if (lingeringSessions.has(sessionId)) { notifySessionEnded(sessionId); lingeringSessions.delete(sessionId); }
+  }, 4000);
+}
+
+// Warm-up: faz uma chamada TTS silenciosa para eliminar cold start
+async function warmupTTS() {
+  try {
+    await synthesizeSpeech("ok", "en");
+    console.log("[TTS] Warm-up concluído");
+  } catch (_) {}
 }
 
 function notifySessionEnded(sessionId) {
@@ -97,54 +118,71 @@ async function onTranscript(sessionId, transcript, isFinal) {
   const lingering = lingeringSessions.get(sessionId);
   const listeners = session?.listeners || lingering?.listeners;
   const language = session?.language || lingering?.language;
-  if (!listeners || listeners.size === 0) { console.log(`[Session ${sessionId}] sem alunos, ignorando`); return; }
+
+  if (!listeners || listeners.size === 0) return;
+
   if (!isFinal) {
-    if (session?.professorWs?.readyState === 1) session.professorWs.send(JSON.stringify({ type: "transcript_interim", text: transcript }));
+    if (session?.professorWs?.readyState === 1) {
+      session.professorWs.send(JSON.stringify({ type: "transcript_interim", text: transcript }));
+    }
     return;
   }
+
   console.log(`[Session ${sessionId}] Transcript final: "${transcript}"`);
-  if (session?.professorWs?.readyState === 1) session.professorWs.send(JSON.stringify({ type: "transcript_final", text: transcript }));
-  if (session?._processing) { session._queue.push(transcript); return; }
-  if (session) session._processing = true;
-  await processTranscript(transcript, listeners, language);
-  if (session) session._processing = false;
-  while (session?._queue?.length > 0) {
-    const next = session._queue.shift();
-    session._processing = true;
-    await processTranscript(next, listeners, language);
-    session._processing = false;
+  if (session?.professorWs?.readyState === 1) {
+    session.professorWs.send(JSON.stringify({ type: "transcript_final", text: transcript }));
   }
-  if (!session && lingeringSessions.has(sessionId)) { notifySessionEnded(sessionId); lingeringSessions.delete(sessionId); }
+
+  // Deduplicação: ignora se já está sendo processado
+  if (session) {
+    if (session._inFlight.has(transcript)) return;
+    session._inFlight.add(transcript);
+  }
+
+  // Processa em paralelo — sem fila serial
+  processTranscript(transcript, listeners, language).finally(() => {
+    session?._inFlight.delete(transcript);
+    if (!session && lingeringSessions.has(sessionId)) {
+      notifySessionEnded(sessionId);
+      lingeringSessions.delete(sessionId);
+    }
+  });
 }
 
 async function processTranscript(transcript, listeners, language) {
   const neededLangs = new Set();
-  for (const [, info] of listeners) { const lang = info.targetLang || "en"; if (lang !== language) neededLangs.add(lang); }
+  for (const [, info] of listeners) {
+    const lang = info.targetLang || "en";
+    if (lang !== language) neededLangs.add(lang);
+  }
   if (neededLangs.size === 0) return;
+
   const audioByLang = new Map();
   await Promise.all([...neededLangs].map(async (tl) => {
-    try { const a = await translateAndSpeak(transcript, language, tl); if (a) audioByLang.set(tl, a); }
-    catch (err) { console.error(`[Pipeline] ${tl}:`, err.message); }
+    try {
+      const a = await translateAndSpeak(transcript, language, tl);
+      if (a) audioByLang.set(tl, a);
+    } catch (err) { console.error(`[Pipeline] ${tl}:`, err.message); }
   }));
+
   for (const [lws, info] of listeners) {
     const lang = info.targetLang || "en";
     if (lang === language) continue;
     const audio = audioByLang.get(lang);
-    if (audio && lws.readyState === 1) lws.send(JSON.stringify({ type: "audio", data: Buffer.from(audio).toString("base64") }));
+    if (audio && lws.readyState === 1) {
+      lws.send(JSON.stringify({ type: "audio", data: Buffer.from(audio).toString("base64") }));
+    }
   }
 }
 
-function handleAudioData(sessionId, audioBuffer, mimeType) {
+function handleAudioData(sessionId, audioBuffer) {
   const session = activeSessions.get(sessionId);
-  if (!session || audioBuffer.length < 100) return;
-  const encoding = mimeToEncoding(mimeType);
-  if (encoding && encoding !== session.encoding) {
-    session.encoding = encoding;
-    console.log(`[Session ${sessionId}] encoding: ${encoding}`);
-    openDeepgramStream(sessionId, encoding);
-  } else if (!session.dgStream || session.dgStream.readyState > 1) {
-    openDeepgramStream(sessionId, session.encoding);
+  if (!session || audioBuffer.length < 100 || session.dgBlocked) return;
+
+  if (!session.dgStream || session.dgStream.isClosed || session.dgStream.readyState > 1) {
+    openDeepgramStream(sessionId);
   }
+
   session.dgStream?.send(audioBuffer);
 }
 
@@ -156,12 +194,27 @@ async function handleControlMessage(ws, msg, userId, setRole) {
       try {
         const dbSession = await createSession(professorId, msg.subject || "Aula", msg.language || "pt");
         const sessionId = dbSession.id;
-        activeSessions.set(sessionId, { professorWs: ws, professorId, professorName: msg.professorName || "Professor", subject: dbSession.subject, language: dbSession.language, listeners: new Map(), dgStream: null, encoding: null, _processing: false, _queue: [] });
-        openDeepgramStream(sessionId, null);
+        activeSessions.set(sessionId, {
+          professorWs: ws,
+          professorId,
+          professorName: msg.professorName || "Professor",
+          subject: dbSession.subject,
+          language: dbSession.language,
+          listeners: new Map(),
+          dgStream: null,
+          dgBlocked: false, // true quando Deepgram retorna 400 (API key inválida)
+          _inFlight: new Set(),
+        });
+        openDeepgramStream(sessionId);
+        // Warm-up do TTS: elimina cold start da primeira fala
+        warmupTTS().catch(() => {});
         setRole("professor", sessionId);
         ws.send(JSON.stringify({ type: "session_created", sessionId }));
         console.log(`[Session ${sessionId}] criada por ${msg.professorName}`);
-      } catch (err) { console.error("professor_start error:", err.message); ws.send(JSON.stringify({ type: "error", message: err.message })); }
+      } catch (err) {
+        console.error("professor_start error:", err.message);
+        ws.send(JSON.stringify({ type: "error", message: err.message }));
+      }
       break;
     }
     case "professor_stop": {
@@ -174,7 +227,11 @@ async function handleControlMessage(ws, msg, userId, setRole) {
       if (!session) { ws.send(JSON.stringify({ type: "error", message: "Sessao nao encontrada" })); return; }
       const studentId = userId || msg.studentId;
       const targetLang = msg.language || "en";
-      if (studentId) { for (const [ews, info] of session.listeners) { if (info.studentId === studentId && ews !== ws) { session.listeners.delete(ews); break; } } }
+      if (studentId) {
+        for (const [ews, info] of session.listeners) {
+          if (info.studentId === studentId && ews !== ws) { session.listeners.delete(ews); break; }
+        }
+      }
       session.listeners.set(ws, { studentId, targetLang });
       setRole("student", msg.sessionId);
       ws.send(JSON.stringify({ type: "joined", professorName: session.professorName, subject: session.subject }));
@@ -184,7 +241,10 @@ async function handleControlMessage(ws, msg, userId, setRole) {
     }
     case "student_set_language": {
       const lang = msg.language || "en";
-      for (const [, session] of activeSessions) { const info = session.listeners.get(ws); if (info) { info.targetLang = lang; break; } }
+      for (const [, session] of activeSessions) {
+        const info = session.listeners.get(ws);
+        if (info) { info.targetLang = lang; break; }
+      }
       ws.send(JSON.stringify({ type: "language_set", language: lang }));
       break;
     }

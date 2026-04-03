@@ -5,24 +5,41 @@
 
 const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY;
 
-// Google usa códigos ISO 639-1 simples
 const GOOGLE_LANG_CODES = {
-  pt: 'pt',
-  en: 'en',
-  es: 'es',
-  fr: 'fr',
-  de: 'de',
-  it: 'it',
-  ja: 'ja',
-  ko: 'ko',
-  zh: 'zh-CN',
+  pt: 'pt', en: 'en', es: 'es', fr: 'fr', de: 'de',
+  it: 'it', ja: 'ja', ko: 'ko', zh: 'zh-CN',
 };
+
+// Cache LRU simples — evita re-traduzir frases repetidas (comum em aulas)
+const MAX_CACHE = 200;
+const translateCache = new Map();
+
+function cacheGet(key) {
+  const val = translateCache.get(key);
+  if (!val) return null;
+  // Move para o fim (LRU)
+  translateCache.delete(key);
+  translateCache.set(key, val);
+  return val;
+}
+
+function cacheSet(key, val) {
+  if (translateCache.size >= MAX_CACHE) {
+    // Remove o mais antigo
+    translateCache.delete(translateCache.keys().next().value);
+  }
+  translateCache.set(key, val);
+}
 
 export async function translateText(text, sourceLang, targetLang) {
   if (!text || sourceLang === targetLang) return text;
 
   const source = GOOGLE_LANG_CODES[sourceLang] || sourceLang;
   const target = GOOGLE_LANG_CODES[targetLang] || targetLang;
+  const cacheKey = `${source}|${target}|${text}`;
+
+  const cached = cacheGet(cacheKey);
+  if (cached) return cached;
 
   try {
     const response = await fetch(
@@ -40,7 +57,9 @@ export async function translateText(text, sourceLang, targetLang) {
     }
 
     const data = await response.json();
-    return data.data?.translations?.[0]?.translatedText?.trim() || '';
+    const result = data.data?.translations?.[0]?.translatedText?.trim() || '';
+    if (result) cacheSet(cacheKey, result);
+    return result;
   } catch (err) {
     console.error('Translation error:', err.message);
     throw err;
