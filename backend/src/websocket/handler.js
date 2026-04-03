@@ -50,8 +50,8 @@ export function setupWebSocket(server) {
 
 function mimeToEncoding(mimeType) {
   if (!mimeType) return null;
-  if (mimeType.includes("webm")) return "webm";
-  if (mimeType.includes("mp4") || mimeType.includes("aac")) return "mp4";
+  if (mimeType.includes("webm")) return "webm-opus";
+  if (mimeType.includes("mp4") || mimeType.includes("aac")) return "aac";
   if (mimeType.includes("ogg")) return "ogg-opus";
   return null;
 }
@@ -63,7 +63,14 @@ function openDeepgramStream(sessionId, encoding) {
   session.dgStream = createDeepgramStream(
     session.language, encoding || null,
     (transcript, isFinal) => onTranscript(sessionId, transcript, isFinal),
-    (err) => { console.error(`[Session ${sessionId}] DG error:`, err.message); setTimeout(() => { if (activeSessions.has(sessionId)) openDeepgramStream(sessionId, session.encoding); }, 500); }
+    (err) => {
+      console.error(`[Session ${sessionId}] DG error:`, err.message);
+      if (err.message && err.message.includes("400")) {
+        console.error(`[Session ${sessionId}] Erro 400 - nao reconectando`);
+        return;
+      }
+      setTimeout(() => { if (activeSessions.has(sessionId)) openDeepgramStream(sessionId, session.encoding); }, 500);
+    }
   );
 }
 
