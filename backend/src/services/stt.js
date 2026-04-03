@@ -53,15 +53,15 @@ export function createDeepgramStream(language = 'pt', onTranscript, onError) {
   let pendingChunks = [];
   let lastAudioAt = Date.now();
 
-  // Keepalive: envia KeepAlive JSON a cada 8s para evitar timeout do Deepgram (10s)
+  // Keepalive: envia KeepAlive JSON a cada 5s para evitar timeout do Deepgram (10s)
   const keepaliveInterval = setInterval(() => {
     if (!isOpen) return;
     const idleMs = Date.now() - lastAudioAt;
-    if (idleMs >= 7000) {
+    if (idleMs >= 4000) {
       ws.send(JSON.stringify({ type: 'KeepAlive' }));
       console.log('[STT/Deepgram] KeepAlive enviado');
     }
-  }, 8000);
+  }, 5000);
 
   ws.on('open', () => {
     isOpen = true;
