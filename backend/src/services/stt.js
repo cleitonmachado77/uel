@@ -47,6 +47,7 @@ export function createDeepgramStream(language = 'pt', encoding, onTranscript, on
   if (encoding) params.set('encoding', encoding);
 
   const url = `wss://api.deepgram.com/v1/listen?${params.toString()}`;
+  console.log(`[STT/Deepgram] Conectando: ${url}`);
 
   const ws = new WebSocket(url, {
     headers: { Authorization: `Token ${DEEPGRAM_API_KEY}` },
