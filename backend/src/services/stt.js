@@ -38,8 +38,8 @@ export function createDeepgramStream(language = 'pt', onTranscript, onError) {
     language: langCode,
     punctuate: 'true',
     interim_results: 'true',
-    endpointing: '300',       // detecta fim de fala após 300ms de silêncio
-    utterance_end_ms: '1000', // emite utterance_end após 1s sem fala
+    endpointing: '300',
+    utterance_end_ms: '1000',
     vad_events: 'true',
   });
 
@@ -51,11 +51,21 @@ export function createDeepgramStream(language = 'pt', onTranscript, onError) {
 
   let isOpen = false;
   let pendingChunks = [];
+  let lastAudioAt = Date.now();
+
+  // Keepalive: envia KeepAlive JSON a cada 8s para evitar timeout do Deepgram (10s)
+  const keepaliveInterval = setInterval(() => {
+    if (!isOpen) return;
+    const idleMs = Date.now() - lastAudioAt;
+    if (idleMs >= 7000) {
+      ws.send(JSON.stringify({ type: 'KeepAlive' }));
+      console.log('[STT/Deepgram] KeepAlive enviado');
+    }
+  }, 8000);
 
   ws.on('open', () => {
     isOpen = true;
     console.log(`[STT/Deepgram] Stream aberto lang=${langCode}`);
-    // Envia chunks que chegaram antes da conexão abrir
     for (const chunk of pendingChunks) ws.send(chunk);
     pendingChunks = [];
   });
@@ -95,6 +105,7 @@ export function createDeepgramStream(language = 'pt', onTranscript, onError) {
 
   ws.on('close', (code, reason) => {
     isOpen = false;
+    clearInterval(keepaliveInterval);
     console.log(`[STT/Deepgram] Stream fechado code=${code} reason=${reason?.toString()}`);
   });
 
@@ -104,6 +115,7 @@ export function createDeepgramStream(language = 'pt', onTranscript, onError) {
      * @param {Buffer} audioBuffer
      */
     send(audioBuffer) {
+      lastAudioAt = Date.now();
       if (isOpen) {
         ws.send(audioBuffer);
       } else if (ws.readyState === WebSocket.CONNECTING) {
@@ -115,8 +127,8 @@ export function createDeepgramStream(language = 'pt', onTranscript, onError) {
      * Sinaliza fim de stream para o Deepgram e fecha a conexão.
      */
     close() {
+      clearInterval(keepaliveInterval);
       if (isOpen) {
-        // Envia CloseStream para flush do buffer interno do Deepgram
         ws.send(JSON.stringify({ type: 'CloseStream' }));
         setTimeout(() => ws.terminate(), 1000);
       } else {
