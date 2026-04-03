@@ -35,7 +35,9 @@ export default function ProfessorPage() {
 
   const onAudioChunk = useCallback((blob: Blob) => {
     blob.arrayBuffer().then((buf) => {
-      wsRef.current?.sendBinary(buf);
+      // Envia mimeType junto para o backend configurar o Deepgram corretamente
+      const b64 = btoa(String.fromCharCode(...new Uint8Array(buf)));
+      wsRef.current?.send({ type: 'audio_chunk', mimeType: blob.type || 'audio/webm', data: b64 });
     });
   }, []);
 

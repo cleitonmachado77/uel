@@ -30,11 +30,11 @@ const LANG_CODES = {
  * @param {function} onTranscript - callback(transcript: string, isFinal: boolean)
  * @param {function} onError - callback(err: Error)
  */
-export function createDeepgramStream(language = 'pt', onTranscript, onError) {
+export function createDeepgramStream(language = 'pt', encoding, onTranscript, onError) {
   const langCode = LANG_CODES[language] || 'pt-BR';
 
   const params = new URLSearchParams({
-    model: 'nova-3',
+    model: 'nova-2',
     language: langCode,
     punctuate: 'true',
     interim_results: 'true',
@@ -42,6 +42,9 @@ export function createDeepgramStream(language = 'pt', onTranscript, onError) {
     utterance_end_ms: '1000',
     vad_events: 'true',
   });
+
+  // Informa o encoding ao Deepgram se conhecido — melhora reconhecimento
+  if (encoding) params.set('encoding', encoding);
 
   const url = `wss://api.deepgram.com/v1/listen?${params.toString()}`;
 
