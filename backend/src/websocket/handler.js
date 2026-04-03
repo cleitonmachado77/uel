@@ -2,12 +2,7 @@
 import { createDeepgramStream } from '../services/stt.js';
 import { translateAndSpeak } from '../services/pipeline.js';
 import {
-  createSession,
-  endSession,
-  joinSessionDB,
-  leaveSessionDB,
-  syncListenerCount,
-  validateToken,
+  createSession, endSession, joinSessionDB, leaveSessionDB, syncListenerCount, validateToken,
 } from '../services/supabase.js';
 
 const activeSessions = new Map();
@@ -73,14 +68,28 @@ function openDeepgramStream(sessionId) {
 async function closeSession(sessionId) {
   const session = activeSessions.get(sessionId);
   if (!session) return;
+  // Registra lingering ANTES de fechar — session_ended so sera enviado apos o ultimo audio
   lingeringSessions.set(sessionId, { listeners: new Map(session.listeners), language: session.language });
   if (session.dgStream) { try { session.dgStream.close(); } catch (_) {} }
-  for (const [lws] of session.listeners) { try { lws.send(JSON.stringify({ type: 'session_ended' })); } catch (_) {} }
   activeSessions.delete(sessionId);
   syncListenerCount(sessionId, 0).catch(() => {});
   await endSession(sessionId);
   console.log(`[Session ${sessionId}] encerrada`);
-  setTimeout(() => lingeringSessions.delete(sessionId), 5000);
+  // Fallback: se Deepgram nao emitir is_final em 4s, notifica e limpa
+  setTimeout(() => {
+    if (lingeringSessions.has(sessionId)) {
+      notifySessionEnded(sessionId);
+      lingeringSessions.delete(sessionId);
+    }
+  }, 4000);
+}
+
+function notifySessionEnded(sessionId) {
+  const lingering = lingeringSessions.get(sessionId);
+  if (!lingering) return;
+  for (const [lws] of lingering.listeners) {
+    try { lws.send(JSON.stringify({ type: 'session_ended' })); } catch (_) {}
+  }
 }
 
 async function onTranscript(sessionId, transcript, isFinal) {
@@ -104,6 +113,11 @@ async function onTranscript(sessionId, transcript, isFinal) {
     session._processing = true;
     await processTranscript(next, listeners, language);
     session._processing = false;
+  }
+  // Se era lingering, notifica session_ended APOS entregar o audio
+  if (!session && lingeringSessions.has(sessionId)) {
+    notifySessionEnded(sessionId);
+    lingeringSessions.delete(sessionId);
   }
 }
 
@@ -136,7 +150,7 @@ async function handleControlMessage(ws, msg, userId, setRole) {
   switch (msg.type) {
     case 'professor_start': {
       const professorId = userId || msg.professorId;
-      if (!professorId) { ws.send(JSON.stringify({ type: 'error', message: 'Autenticação necessária' })); return; }
+      if (!professorId) { ws.send(JSON.stringify({ type: 'error', message: 'Autenticacao necessaria' })); return; }
       try {
         const dbSession = await createSession(professorId, msg.subject || 'Aula', msg.language || 'pt');
         const sessionId = dbSession.id;
@@ -155,7 +169,7 @@ async function handleControlMessage(ws, msg, userId, setRole) {
     }
     case 'student_join': {
       const session = activeSessions.get(msg.sessionId);
-      if (!session) { ws.send(JSON.stringify({ type: 'error', message: 'Sessão não encontrada' })); return; }
+      if (!session) { ws.send(JSON.stringify({ type: 'error', message: 'Sessao nao encontrada' })); return; }
       const studentId = userId || msg.studentId;
       const targetLang = msg.language || 'en';
       if (studentId) {
