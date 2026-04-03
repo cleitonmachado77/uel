@@ -107,7 +107,8 @@ async function closeSession(sessionId) {
   const session = activeSessions.get(sessionId);
   if (!session) return;
 
-  // Fecha stream Deepgram
+  // Fecha stream Deepgram — mas mantém os listeners vivos por mais 5s
+  // para processar transcripts finais que chegam após o CloseStream
   if (session.dgStream) {
     try { session.dgStream.close(); } catch (_) {}
   }
@@ -117,7 +118,19 @@ async function closeSession(sessionId) {
     try { listenerWs.send(JSON.stringify({ type: 'session_ended' })); } catch (_) {}
   }
 
+  // Remove da map imediatamente para novas conexões, mas mantém referência local
+  // para o callback do Deepgram processar o último transcript
+  const lingering = { ...session, listeners: new Map(session.listeners) };
   activeSessions.delete(sessionId);
+
+  // Processa fila pendente com os listeners ainda ativos
+  setTimeout(async () => {
+    while (lingering._queue?.length > 0) {
+      const t = lingering._queue.shift();
+      await processTranscript(sessionId, t, lingering.listeners, lingering.language);
+    }
+  }, 200);
+
   syncListenerCount(sessionId, 0).catch(() => {});
   await endSession(sessionId);
   console.log(`[Session ${sessionId}] encerrada`);
@@ -129,10 +142,7 @@ async function onTranscript(sessionId, transcript, isFinal) {
   const session = activeSessions.get(sessionId);
   if (!session || session.listeners.size === 0) return;
 
-  // Usa resultados interinos para exibir texto no frontend (opcional)
-  // Para TTS só processa resultados finais para evitar fala duplicada
   if (!isFinal) {
-    // Envia transcript parcial para o professor ver feedback visual
     if (session.professorWs?.readyState === 1) {
       session.professorWs.send(JSON.stringify({ type: 'transcript_interim', text: transcript }));
     }
@@ -141,14 +151,11 @@ async function onTranscript(sessionId, transcript, isFinal) {
 
   console.log(`[Session ${sessionId}] Transcript final: "${transcript}"`);
 
-  // Envia transcript final para o professor
   if (session.professorWs?.readyState === 1) {
     session.professorWs.send(JSON.stringify({ type: 'transcript_final', text: transcript }));
   }
 
-  // Evita processar se já há um pipeline rodando para este transcript
   if (session._processing) {
-    console.log('[Handler] Pipeline busy, queuing transcript');
     session._queue = session._queue || [];
     session._queue.push(transcript);
     return;
@@ -156,28 +163,29 @@ async function onTranscript(sessionId, transcript, isFinal) {
 
   await processTranscript(sessionId, transcript);
 
-  // Processa fila se houver
   while (session._queue?.length > 0) {
     const next = session._queue.shift();
     await processTranscript(sessionId, next);
   }
 }
 
-async function processTranscript(sessionId, transcript) {
+async function processTranscript(sessionId, transcript, listenersOverride, languageOverride) {
   const session = activeSessions.get(sessionId);
-  if (!session) return;
+  const listeners = listenersOverride || session?.listeners;
+  const language = languageOverride || session?.language;
 
-  session._processing = true;
+  if (!listeners || listeners.size === 0) return;
+  if (session) session._processing = true;
 
   // Coleta idiomas únicos necessários
   const neededLangs = new Set();
-  for (const [, info] of session.listeners) {
+  for (const [, info] of listeners) {
     const lang = info.targetLang || 'en';
-    if (lang !== session.language) neededLangs.add(lang);
+    if (lang !== language) neededLangs.add(lang);
   }
 
   if (neededLangs.size === 0) {
-    session._processing = false;
+    if (session) session._processing = false;
     return;
   }
 
@@ -186,7 +194,7 @@ async function processTranscript(sessionId, transcript) {
   await Promise.all(
     [...neededLangs].map(async (targetLang) => {
       try {
-        const audio = await translateAndSpeak(transcript, session.language, targetLang);
+        const audio = await translateAndSpeak(transcript, language, targetLang);
         if (audio) audioByLang.set(targetLang, audio);
       } catch (err) {
         console.error(`[Pipeline] Erro para ${targetLang}:`, err.message);
@@ -195,9 +203,9 @@ async function processTranscript(sessionId, transcript) {
   );
 
   // Envia áudio para cada listener
-  for (const [listenerWs, info] of session.listeners) {
+  for (const [listenerWs, info] of listeners) {
     const lang = info.targetLang || 'en';
-    if (lang === session.language) continue;
+    if (lang === language) continue;
     const audio = audioByLang.get(lang);
     if (audio && listenerWs.readyState === 1) {
       listenerWs.send(JSON.stringify({
@@ -207,7 +215,7 @@ async function processTranscript(sessionId, transcript) {
     }
   }
 
-  session._processing = false;
+  if (session) session._processing = false;
 }
 
 // ─── Audio data handler ───────────────────────────────────────────────────────

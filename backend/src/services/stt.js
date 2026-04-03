@@ -83,7 +83,9 @@ export function createDeepgramStream(language = 'pt', onTranscript, onError) {
         console.log(`[STT/Deepgram] Results: isFinal=${isFinal} confidence=${confidence.toFixed(2)} transcript="${transcript}"`);
 
         if (!transcript || transcript.length < 2) return;
-        if (!isFinal && confidence < 0.6) return;
+
+        // Para interinos, exige confiança alta (evita ruído mas não descarta fala real)
+        if (!isFinal && confidence < 0.85) return;
 
         const cleaned = transcript.replace(/[.,!?;:\-–—…\s]/g, '');
         if (cleaned.length < 2) return;
