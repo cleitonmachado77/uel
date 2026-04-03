@@ -1,7 +1,12 @@
 /**
- * Speech-to-Text usando Deepgram Nova-3
- * https://developers.deepgram.com/docs/stt/getting-started
+ * Speech-to-Text usando Deepgram Live Streaming (Nova-3)
+ * https://developers.deepgram.com/docs/getting-started-with-live-streaming-audio
+ *
+ * Modo streaming com interim_results para reduzir latência.
+ * Cada sessão de professor mantém uma conexão WebSocket persistente com Deepgram.
  */
+
+import { WebSocket } from 'ws';
 
 const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY;
 
@@ -18,44 +23,142 @@ const LANG_CODES = {
 };
 
 /**
- * Detecta o content-type do áudio pelo magic number do buffer.
+ * Cria uma conexão de streaming com Deepgram.
+ * Retorna um objeto com métodos para enviar áudio e fechar a conexão.
+ *
+ * @param {string} language - código de idioma (pt, en, es...)
+ * @param {function} onTranscript - callback(transcript: string, isFinal: boolean)
+ * @param {function} onError - callback(err: Error)
  */
-function detectContentType(audioBuffer) {
-  const buf = Buffer.from(audioBuffer);
+export function createDeepgramStream(language = 'pt', onTranscript, onError) {
+  const langCode = LANG_CODES[language] || 'pt-BR';
 
-  if (buf.length >= 4 && buf[0] === 0x1a && buf[1] === 0x45 && buf[2] === 0xdf && buf[3] === 0xa3) {
-    return 'audio/webm';
-  }
-  if (buf.length >= 8 && buf.toString('ascii', 4, 8) === 'ftyp') {
-    return 'audio/mp4';
-  }
-  if (buf.length >= 4 && buf.toString('ascii', 0, 4) === 'OggS') {
-    return 'audio/ogg';
-  }
-  return 'audio/webm';
+  const params = new URLSearchParams({
+    model: 'nova-3',
+    language: langCode,
+    punctuate: 'true',
+    interim_results: 'true',
+    endpointing: '300',       // detecta fim de fala após 300ms de silêncio
+    utterance_end_ms: '1000', // emite utterance_end após 1s sem fala
+    vad_events: 'true',
+  });
+
+  const url = `wss://api.deepgram.com/v1/listen?${params.toString()}`;
+
+  const ws = new WebSocket(url, {
+    headers: { Authorization: `Token ${DEEPGRAM_API_KEY}` },
+  });
+
+  let isOpen = false;
+  let pendingChunks = [];
+
+  ws.on('open', () => {
+    isOpen = true;
+    console.log(`[STT/Deepgram] Stream aberto lang=${langCode}`);
+    // Envia chunks que chegaram antes da conexão abrir
+    for (const chunk of pendingChunks) ws.send(chunk);
+    pendingChunks = [];
+  });
+
+  ws.on('message', (data) => {
+    try {
+      const msg = JSON.parse(data.toString());
+
+      if (msg.type === 'Results') {
+        const alt = msg.channel?.alternatives?.[0];
+        const transcript = alt?.transcript?.trim();
+        const isFinal = msg.is_final === true;
+        const confidence = alt?.confidence ?? 0;
+
+        if (!transcript || transcript.length < 2) return;
+        if (!isFinal && confidence < 0.6) return; // ignora interinos com baixa confiança
+
+        // Filtra transcrições que são apenas pontuação/ruído
+        const cleaned = transcript.replace(/[.,!?;:\-–—…\s]/g, '');
+        if (cleaned.length < 2) return;
+
+        onTranscript(transcript, isFinal);
+      }
+
+      if (msg.type === 'SpeechStarted') {
+        console.log('[STT/Deepgram] Fala detectada');
+      }
+    } catch (err) {
+      console.error('[STT/Deepgram] Parse error:', err.message);
+    }
+  });
+
+  ws.on('error', (err) => {
+    console.error('[STT/Deepgram] Stream error:', err.message);
+    onError?.(err);
+  });
+
+  ws.on('close', (code, reason) => {
+    isOpen = false;
+    console.log(`[STT/Deepgram] Stream fechado code=${code} reason=${reason?.toString()}`);
+  });
+
+  return {
+    /**
+     * Envia chunk de áudio para o Deepgram.
+     * @param {Buffer} audioBuffer
+     */
+    send(audioBuffer) {
+      if (isOpen) {
+        ws.send(audioBuffer);
+      } else if (ws.readyState === WebSocket.CONNECTING) {
+        pendingChunks.push(audioBuffer);
+      }
+    },
+
+    /**
+     * Sinaliza fim de stream para o Deepgram e fecha a conexão.
+     */
+    close() {
+      if (isOpen) {
+        // Envia CloseStream para flush do buffer interno do Deepgram
+        ws.send(JSON.stringify({ type: 'CloseStream' }));
+        setTimeout(() => ws.terminate(), 1000);
+      } else {
+        ws.terminate();
+      }
+    },
+
+    get readyState() {
+      return ws.readyState;
+    },
+  };
 }
 
+/**
+ * Mantém compatibilidade com o modo batch (usado em stt-translate.js).
+ * Faz uma transcrição única via REST para casos pontuais.
+ */
 export async function transcribeAudio(audioBuffer, language = 'pt') {
   if (audioBuffer.length < 1000) return '';
 
-  const contentType = detectContentType(audioBuffer);
   const langCode = LANG_CODES[language] || 'pt-BR';
+
+  // Detecta content-type pelo magic number
+  const buf = Buffer.from(audioBuffer);
+  let contentType = 'audio/webm';
+  if (buf.length >= 4 && buf[0] === 0x1a && buf[1] === 0x45) contentType = 'audio/webm';
+  else if (buf.length >= 8 && buf.toString('ascii', 4, 8) === 'ftyp') contentType = 'audio/mp4';
+  else if (buf.length >= 4 && buf.toString('ascii', 0, 4) === 'OggS') contentType = 'audio/ogg';
 
   const url = new URL('https://api.deepgram.com/v1/listen');
   url.searchParams.set('model', 'nova-3');
   url.searchParams.set('language', langCode);
   url.searchParams.set('punctuate', 'true');
 
-  console.log(`[STT/Deepgram] content-type: ${contentType}, lang: ${langCode}, buffer: ${audioBuffer.length} bytes`);
-
   try {
     const response = await fetch(url.toString(), {
       method: 'POST',
       headers: {
-        'Authorization': `Token ${DEEPGRAM_API_KEY}`,
+        Authorization: `Token ${DEEPGRAM_API_KEY}`,
         'Content-Type': contentType,
       },
-      body: Buffer.from(audioBuffer),
+      body: buf,
     });
 
     if (!response.ok) {
@@ -69,12 +172,7 @@ export async function transcribeAudio(audioBuffer, language = 'pt') {
     const transcript = alt?.transcript || '';
     const confidence = alt?.confidence ?? 0;
 
-    // Descarta transcrições com baixa confiança (ruído/silêncio interpretado como fala)
-    if (confidence < 0.4) {
-      console.log(`[STT/Deepgram] Low confidence (${confidence.toFixed(2)}), discarding: "${transcript}"`);
-      return '';
-    }
-
+    if (confidence < 0.4) return '';
     return transcript.trim();
   } catch (err) {
     console.error('STT error:', err.message);
