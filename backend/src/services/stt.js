@@ -80,10 +80,11 @@ export function createDeepgramStream(language = 'pt', onTranscript, onError) {
         const isFinal = msg.is_final === true;
         const confidence = alt?.confidence ?? 0;
 
-        if (!transcript || transcript.length < 2) return;
-        if (!isFinal && confidence < 0.6) return; // ignora interinos com baixa confiança
+        console.log(`[STT/Deepgram] Results: isFinal=${isFinal} confidence=${confidence.toFixed(2)} transcript="${transcript}"`);
 
-        // Filtra transcrições que são apenas pontuação/ruído
+        if (!transcript || transcript.length < 2) return;
+        if (!isFinal && confidence < 0.6) return;
+
         const cleaned = transcript.replace(/[.,!?;:\-–—…\s]/g, '');
         if (cleaned.length < 2) return;
 
@@ -92,6 +93,10 @@ export function createDeepgramStream(language = 'pt', onTranscript, onError) {
 
       if (msg.type === 'SpeechStarted') {
         console.log('[STT/Deepgram] Fala detectada');
+      }
+
+      if (msg.type === 'UtteranceEnd') {
+        console.log('[STT/Deepgram] UtteranceEnd recebido');
       }
     } catch (err) {
       console.error('[STT/Deepgram] Parse error:', err.message);
