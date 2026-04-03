@@ -217,6 +217,11 @@ function handleAudioData(sessionId, audioBuffer) {
   if (!session || session.listeners.size === 0) return;
   if (audioBuffer.length < 1000) return;
 
+  // Abre o stream Deepgram no primeiro chunk (evita timeout por inatividade)
+  if (!session.dgStream || session.dgStream.readyState > 1) {
+    openDeepgramStream(sessionId);
+  }
+
   // Envia direto para o stream Deepgram (sem esperar resposta)
   session.dgStream?.send(audioBuffer);
 }
@@ -252,8 +257,7 @@ async function handleControlMessage(ws, msg, userId, setRole) {
           _queue: [],
         });
 
-        // Abre stream Deepgram imediatamente
-        openDeepgramStream(sessionId);
+        // Stream Deepgram será aberto no primeiro chunk de áudio
 
         setRole('professor', sessionId);
         ws.send(JSON.stringify({ type: 'session_created', sessionId }));
