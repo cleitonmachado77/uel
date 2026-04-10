@@ -214,34 +214,32 @@ export function useAudioPlayer() {
     const sampleRate = Number(item.meta?.sampleRate) || 24000;
     const isPcm = codec === 'pcm16le' || codec === 'linear16' || codec === 'pcm16';
     if (isPcm) {
-      // Mobile: prioriza WAV + HTMLAudioElement (mais compatível que AudioContext)
-      const played = !isMobile && playPcmChunk(item.data, sampleRate);
+      const played = playPcmChunk(item.data, sampleRate);
       if (played) {
         if (queueRef.current.length > 0) playNext();
         return;
       }
 
-      // Coalescência mobile: junta chunks PCM consecutivos para evitar "picotes"
-      // causados por troca frequente de src no HTMLAudioElement.
-      let mergedData = item.data;
+      // Em mobile, se o contexto ainda nao estiver pronto, tenta novamente
+      // em vez de cair para WAV por chunk (causa cortes e bloqueios intermitentes).
       if (isMobile) {
-        const chunks = [new Uint8Array(item.data)];
-        let totalBytes = item.data.byteLength;
-        while (queueRef.current.length > 0 && totalBytes < MOBILE_WAV_TARGET_BYTES) {
-          const peek = queueRef.current[0];
-          const peekCodec = (peek.meta?.codec as string | undefined)?.toLowerCase();
-          const peekIsPcm = peekCodec === 'pcm16le' || peekCodec === 'linear16' || peekCodec === 'pcm16';
-          const peekRate = Number(peek.meta?.sampleRate) || sampleRate;
-          if (!peekIsPcm || peekRate !== sampleRate) break;
-          const next = queueRef.current.shift()!;
-          chunks.push(new Uint8Array(next.data));
-          totalBytes += next.data.byteLength;
+        queueRef.current.unshift(item);
+        playingRef.current = false;
+        setIsPlaying(false);
+        if (!retryPlayTimerRef.current) {
+          retryPlayTimerRef.current = setTimeout(() => {
+            retryPlayTimerRef.current = null;
+            ensureAudioReady();
+            if (queueRef.current.length > 0 && !playingRef.current) {
+              playNext();
+            }
+          }, 80);
         }
-        mergedData = concatUint8(chunks);
+        return;
       }
 
       // Fallback para mobile: encapsula PCM em WAV e reproduz via HTMLAudioElement.
-      const wavBlob = pcm16ToWav(mergedData, sampleRate);
+      const wavBlob = pcm16ToWav(item.data, sampleRate);
       const wavUrl = URL.createObjectURL(wavBlob);
       currentUrlRef.current = wavUrl;
       audio.onended = () => {
@@ -307,7 +305,7 @@ export function useAudioPlayer() {
         }, 120);
       }
     });
-  }, [concatUint8, ensureAudioReady, getAudio, isMobile, pcm16ToWav, playPcmChunk]);
+  }, [ensureAudioReady, getAudio, isMobile, pcm16ToWav, playPcmChunk]);
 
   const enqueue = useCallback((audioData: ArrayBuffer, meta?: Record<string, unknown>) => {
     const codec = (meta?.codec as string | undefined)?.toLowerCase();
@@ -317,8 +315,10 @@ export function useAudioPlayer() {
     if (isMobile) {
       ensureAudioReady();
     }
-    // Mobile: agrupa micro-chunks PCM para reduzir cortes por underrun.
-    if (isMobile && isPcm) {
+    const hasAudioContext = typeof window !== 'undefined' && !!(window.AudioContext || (window as any).webkitAudioContext);
+
+    // Fallback extremo: so agrupa para WAV se AudioContext nao existir.
+    if (isMobile && isPcm && !hasAudioContext) {
       const bytes = new Uint8Array(audioData);
       pcmBatchRef.current.push(bytes);
       pcmBatchBytesRef.current += bytes.byteLength;
