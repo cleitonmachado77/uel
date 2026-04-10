@@ -18,6 +18,12 @@ export function useAudioPlayer() {
   const currentUrlRef = useRef<string | null>(null);
   const ctxRef = useRef<AudioContext | null>(null);
   const nextStartRef = useRef(0);
+  const pcmBatchRef = useRef<Uint8Array[]>([]);
+  const pcmBatchBytesRef = useRef(0);
+  const pcmBatchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const isMobile = typeof navigator !== 'undefined'
+    && /android|iphone|ipad|ipod|mobile/i.test(navigator.userAgent);
 
   const getAudio = useCallback((): HTMLAudioElement => {
     if (!audioRef.current) {
@@ -102,6 +108,17 @@ export function useAudioPlayer() {
     return new Blob([wavHeader, pcmData], { type: 'audio/wav' });
   }, []);
 
+  const concatUint8 = useCallback((chunks: Uint8Array[]): ArrayBuffer => {
+    const total = chunks.reduce((sum, c) => sum + c.byteLength, 0);
+    const merged = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+      merged.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return merged.buffer;
+  }, []);
+
   const playPcmChunk = useCallback((audioData: ArrayBuffer, sampleRate: number) => {
     const ACtx = window.AudioContext || (window as any).webkitAudioContext;
     if (!ACtx) return false;
@@ -164,7 +181,7 @@ export function useAudioPlayer() {
     const sampleRate = Number(item.meta?.sampleRate) || 24000;
     const isPcm = codec === 'pcm16le' || codec === 'linear16' || codec === 'pcm16';
     if (isPcm) {
-      const played = playPcmChunk(item.data, sampleRate);
+      const played = !isMobile && playPcmChunk(item.data, sampleRate);
       if (played) {
         if (queueRef.current.length > 0) playNext();
         return;
@@ -216,23 +233,62 @@ export function useAudioPlayer() {
       currentUrlRef.current = null;
       playNext();
     });
-  }, [getAudio, pcm16ToWav, playPcmChunk]);
+  }, [getAudio, isMobile, pcm16ToWav, playPcmChunk]);
 
   const enqueue = useCallback((audioData: ArrayBuffer, meta?: Record<string, unknown>) => {
-    queueRef.current.push({ data: audioData, meta });
-
     const codec = (meta?.codec as string | undefined)?.toLowerCase();
     const isPcm = codec === 'pcm16le' || codec === 'linear16' || codec === 'pcm16';
+    const sampleRate = Number(meta?.sampleRate) || 24000;
 
-    // Para PCM em streaming, precisamos continuar agendando mesmo já "tocando".
-    // Para MP3 legada, mantemos fluxo sequencial via onended.
+    // Mobile: agrupa micro-chunks PCM para evitar reprodução "muda" em blocos curtos.
+    if (isMobile && isPcm) {
+      const bytes = new Uint8Array(audioData);
+      pcmBatchRef.current.push(bytes);
+      pcmBatchBytesRef.current += bytes.byteLength;
+
+      const flushBatch = () => {
+        if (pcmBatchRef.current.length === 0) return;
+        const merged = concatUint8(pcmBatchRef.current);
+        pcmBatchRef.current = [];
+        pcmBatchBytesRef.current = 0;
+        queueRef.current.push({
+          data: merged,
+          meta: { ...(meta || {}), codec: 'pcm16le', sampleRate },
+        });
+        if (!playingRef.current) playNext();
+      };
+
+      // ~200ms de áudio PCM mono 24kHz 16-bit => ~9600 bytes
+      if (pcmBatchBytesRef.current >= 9600) {
+        if (pcmBatchTimerRef.current) {
+          clearTimeout(pcmBatchTimerRef.current);
+          pcmBatchTimerRef.current = null;
+        }
+        flushBatch();
+      } else if (!pcmBatchTimerRef.current) {
+        pcmBatchTimerRef.current = setTimeout(() => {
+          pcmBatchTimerRef.current = null;
+          flushBatch();
+        }, 120);
+      }
+      return;
+    }
+
+    queueRef.current.push({ data: audioData, meta });
+
     if (isPcm || !playingRef.current) {
       playNext();
     }
-  }, [playNext]);
+  }, [concatUint8, isMobile, playNext]);
 
   const stop = useCallback(() => {
     queueRef.current = [];
+    pcmBatchRef.current = [];
+    pcmBatchBytesRef.current = 0;
+    if (pcmBatchTimerRef.current) {
+      clearTimeout(pcmBatchTimerRef.current);
+      pcmBatchTimerRef.current = null;
+    }
     playingRef.current = false;
     setIsPlaying(false);
     const audio = audioRef.current;
