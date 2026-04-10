@@ -229,14 +229,18 @@ export function useAudioPlayer() {
     const isPcm = codec === 'pcm16le' || codec === 'linear16' || codec === 'pcm16';
 
     if (isPcm) {
-      // AudioContext gapless scheduling (todas as plataformas)
-      const played = playPcmChunk(item.data, sampleRate);
-      if (played) {
-        if (queueRef.current.length > 0) playNext();
-        return;
+      // AudioContext gapless scheduling — só tenta se o contexto JÁ estiver ativo
+      // (evita ctx.resume() que interfere com HTMLAudioElement no iOS)
+      const ctx = ctxRef.current;
+      if (ctx?.state === 'running') {
+        const played = playPcmChunk(item.data, sampleRate);
+        if (played) {
+          if (queueRef.current.length > 0) playNext();
+          return;
+        }
       }
 
-      // Fallback: WAV via HTMLAudioElement (quando AudioContext não está running)
+      // WAV via HTMLAudioElement (confiável no iOS, usado até o AudioContext aquecer)
       playWavViaElement(item.data, sampleRate, () => playNext());
       return;
     }
