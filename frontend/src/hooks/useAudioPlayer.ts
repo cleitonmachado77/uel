@@ -76,6 +76,32 @@ export function useAudioPlayer() {
     });
   }, [getAudio]);
 
+  const pcm16ToWav = useCallback((audioData: ArrayBuffer, sampleRate: number): Blob => {
+    const pcmData = new Uint8Array(audioData);
+    const wavHeader = new ArrayBuffer(44);
+    const view = new DataView(wavHeader);
+    const byteRate = sampleRate * 2;
+    const blockAlign = 2;
+    const dataSize = pcmData.byteLength;
+
+    // RIFF header
+    view.setUint32(0, 0x52494646, false); // "RIFF"
+    view.setUint32(4, 36 + dataSize, true);
+    view.setUint32(8, 0x57415645, false); // "WAVE"
+    view.setUint32(12, 0x666d7420, false); // "fmt "
+    view.setUint32(16, 16, true); // PCM chunk size
+    view.setUint16(20, 1, true); // PCM format
+    view.setUint16(22, 1, true); // mono
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, byteRate, true);
+    view.setUint16(32, blockAlign, true);
+    view.setUint16(34, 16, true); // 16-bit
+    view.setUint32(36, 0x64617461, false); // "data"
+    view.setUint32(40, dataSize, true);
+
+    return new Blob([wavHeader, pcmData], { type: 'audio/wav' });
+  }, []);
+
   const playPcmChunk = useCallback((audioData: ArrayBuffer, sampleRate: number) => {
     const ACtx = window.AudioContext || (window as any).webkitAudioContext;
     if (!ACtx) return false;
@@ -84,6 +110,9 @@ export function useAudioPlayer() {
     ctxRef.current = ctx;
     if (ctx.state === 'suspended') {
       ctx.resume().catch(() => {});
+    }
+    if (ctx.state !== 'running') {
+      return false;
     }
 
     const int16 = new Int16Array(audioData);
@@ -133,12 +162,35 @@ export function useAudioPlayer() {
     const item = queueRef.current.shift()!;
     const codec = (item.meta?.codec as string | undefined)?.toLowerCase();
     const sampleRate = Number(item.meta?.sampleRate) || 24000;
-    if (codec === 'pcm16le' || codec === 'linear16' || codec === 'pcm16') {
+    const isPcm = codec === 'pcm16le' || codec === 'linear16' || codec === 'pcm16';
+    if (isPcm) {
       const played = playPcmChunk(item.data, sampleRate);
       if (played) {
         if (queueRef.current.length > 0) playNext();
         return;
       }
+      // Fallback para mobile: encapsula PCM em WAV e reproduz via HTMLAudioElement.
+      const wavBlob = pcm16ToWav(item.data, sampleRate);
+      const wavUrl = URL.createObjectURL(wavBlob);
+      currentUrlRef.current = wavUrl;
+      audio.onended = () => {
+        URL.revokeObjectURL(wavUrl);
+        currentUrlRef.current = null;
+        playNext();
+      };
+      audio.onerror = () => {
+        URL.revokeObjectURL(wavUrl);
+        currentUrlRef.current = null;
+        playNext();
+      };
+      audio.src = wavUrl;
+      audio.load();
+      audio.play().catch(() => {
+        URL.revokeObjectURL(wavUrl);
+        currentUrlRef.current = null;
+        playNext();
+      });
+      return;
     }
 
     const blob = new Blob([item.data], { type: 'audio/mpeg' });
@@ -164,7 +216,7 @@ export function useAudioPlayer() {
       currentUrlRef.current = null;
       playNext();
     });
-  }, [getAudio, playPcmChunk]);
+  }, [getAudio, pcm16ToWav, playPcmChunk]);
 
   const enqueue = useCallback((audioData: ArrayBuffer, meta?: Record<string, unknown>) => {
     queueRef.current.push({ data: audioData, meta });
