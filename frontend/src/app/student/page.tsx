@@ -115,7 +115,11 @@ export default function StudentPage() {
       const ws = new WSClient({
         onMessage: (msg: WSMessage) => {
           if (msg.type === 'joined') {
+            console.log('[Student] Joined session:', msg.professorName, msg.subject);
             ws.send({ type: 'student_set_language', language: targetLangRef.current });
+          }
+          if (msg.type === 'error') {
+            console.error('[Student] Server error:', msg.message);
           }
           if (msg.type === 'session_ended') {
             leaveSession();

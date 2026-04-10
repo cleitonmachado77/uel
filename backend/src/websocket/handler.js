@@ -8,7 +8,9 @@ const lingeringSessions = new Map();
 
 export function setupWebSocket(server) {
   const wss = new WebSocketServer({ server, path: "/ws" });
-  wss.on("connection", (ws) => {
+  wss.on("connection", (ws, req) => {
+    const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+    console.log(`[WS] Nova conexão de ${clientIp}`);
     let role = null, sessionId = null, userId = null;
 
     ws.on("message", async (data) => {
@@ -186,8 +188,13 @@ async function handleControlMessage(ws, msg, userId, setRole) {
       break;
     }
     case "student_join": {
+      console.log(`[WS] student_join recebido: sessionId=${msg.sessionId}, lang=${msg.language}, studentId=${userId || msg.studentId}`);
       const session = activeSessions.get(msg.sessionId);
-      if (!session) { ws.send(JSON.stringify({ type: "error", message: "Sessao nao encontrada" })); return; }
+      if (!session) {
+        console.warn(`[WS] Sessao ${msg.sessionId} nao encontrada em activeSessions (total: ${activeSessions.size})`);
+        ws.send(JSON.stringify({ type: "error", message: "Sessao nao encontrada" }));
+        return;
+      }
       const studentId = userId || msg.studentId;
       const targetLang = msg.language || "en";
       if (studentId) {
@@ -200,6 +207,7 @@ async function handleControlMessage(ws, msg, userId, setRole) {
       session.rtStream?.updateTargetLanguage(targetLang, { forceReconnect: true });
       setRole("student", msg.sessionId);
       ws.send(JSON.stringify({ type: "joined", professorName: session.professorName, subject: session.subject }));
+      console.log(`[Session ${msg.sessionId}] Aluno conectado (total: ${session.listeners.size})`);
       syncListenerCount(msg.sessionId, session.listeners.size).catch(() => {});
       if (studentId) joinSessionDB(msg.sessionId, studentId, targetLang).catch((e) => console.error("joinSessionDB:", e.message));
       break;
