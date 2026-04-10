@@ -4,7 +4,6 @@ import { useRef, useCallback, useState } from 'react';
 function detectMobile(): boolean {
   if (typeof navigator === 'undefined') return false;
   if (/android|iphone|ipad|ipod|mobile/i.test(navigator.userAgent)) return true;
-  // iPadOS 13+ reports as Macintosh but exposes multi-touch
   if (/Macintosh/i.test(navigator.userAgent) && navigator.maxTouchPoints > 1) return true;
   return false;
 }
@@ -12,10 +11,8 @@ function detectMobile(): boolean {
 /**
  * Player de áudio para mobile e desktop.
  *
- * Estratégia:
- * - AudioContext com BufferSource agendados (gapless scheduling) em todas as plataformas
- * - Mobile: PCM é batched antes de agendar para reduzir overhead
- * - WAV via HTMLAudioElement apenas como fallback se AudioContext não estiver disponível
+ * - Desktop: AudioContext com BufferSource agendados (gapless)
+ * - Mobile/iPad: HTMLAudioElement puro com WAV blobs (compatibilidade iOS)
  */
 export function useAudioPlayer() {
   const [isPlaying, setIsPlaying] = useState(false);
@@ -34,10 +31,10 @@ export function useAudioPlayer() {
 
   const isMobile = detectMobile();
 
-  // Mobile batcha PCM para reduzir overhead de scheduling no AudioContext
-  const PCM_BATCH_BYTES = isMobile ? 14400 : 9600;  // ~300ms vs ~200ms @ 24kHz mono 16-bit
-  const PCM_FLUSH_MS = isMobile ? 200 : 120;
-  const MIN_QUEUE_TO_START = 1;
+  const PCM_BATCH_BYTES = isMobile ? 19200 : 9600;  // ~400ms vs ~200ms @ 24kHz mono 16-bit
+  const PCM_FLUSH_MS = isMobile ? 250 : 120;
+
+  const SILENCE_MP3 = 'data:audio/mp3;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4Ljc2LjEwMAAAAAAAAAAAAAAA//tQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAABhgC7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7//////////////////////////////////////////////////////////////////8AAAAATGF2YzU4LjEzAAAAAAAAAAAAAAAAJAAAAAAAAAAAAYYoRwMHAAAAAAD/+1DEAAAH+ANoUAAABNQKbgzRQAIAAADSAAAAEBof5c/KAgCAIHygIAgfB8HwfB8oCAIAgCB8HwfB8HwfKAgCAIAgfB8HwfB8HygIAgCAIHwfB8HwfB8oCAIAgCB8HwfB8HwfKAgCAIAgfB8HwfB8HygIAgCAIHwfB8HwfB8oCAIAgCB8HwfB8HwfKAgCAIAgfB8HwfB8H/+1DEKYAAADSAMAAAAAAA0gAAAAAygIAgCAIHwfB8HwfB8oCAIAgCB8HwfB8HwfKAgCAIAgfB8HwfB8HygIAgCAIHwfB8HwfB8oCAIAgCB8HwfB8HwfKAgCAIAgfB8HwfB8HygIAgCAIHwfB8HwfB8oCAIAgCB8HwfB8HwfKAgCAIAgfB8HwfB8HygIAgCAIHw==';
 
   const getAudio = useCallback((): HTMLAudioElement => {
     if (!audioRef.current) {
@@ -46,43 +43,36 @@ export function useAudioPlayer() {
       a.setAttribute('webkit-playsinline', 'true');
       (a as any).playsInline = true;
       a.preload = 'auto';
-      a.style.display = 'none';
       document.body.appendChild(a);
       audioRef.current = a;
     }
     return audioRef.current;
   }, []);
 
-  const ensureAudioReady = useCallback(() => {
-    try {
-      const ctx = ctxRef.current;
-      if (ctx?.state === 'suspended') {
-        ctx.resume().catch(() => {});
-      }
-    } catch (_) {}
-  }, []);
-
   const init = useCallback((): Promise<void> => {
     return new Promise((resolve) => {
       if (unlockedRef.current) { resolve(); return; }
 
-      try {
-        const ACtx = window.AudioContext || (window as any).webkitAudioContext;
-        if (ACtx) {
-          const ctx = ctxRef.current || new ACtx();
-          ctxRef.current = ctx;
-          const buf = ctx.createBuffer(1, 1, 22050);
-          const src = ctx.createBufferSource();
-          src.buffer = buf;
-          src.connect(ctx.destination);
-          src.start(0);
-          ctx.resume().catch(() => {});
-        }
-      } catch (_) {}
+      // Desktop: AudioContext unlock
+      if (!isMobile) {
+        try {
+          const ACtx = window.AudioContext || (window as any).webkitAudioContext;
+          if (ACtx) {
+            const ctx = ctxRef.current || new ACtx();
+            ctxRef.current = ctx;
+            const buf = ctx.createBuffer(1, 1, 22050);
+            const src = ctx.createBufferSource();
+            src.buffer = buf;
+            src.connect(ctx.destination);
+            src.start(0);
+            ctx.resume().catch(() => {});
+          }
+        } catch (_) {}
+      }
 
+      // HTMLAudioElement unlock (mobile + desktop)
       const audio = getAudio();
-      const SILENCE = 'data:audio/mp3;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4Ljc2LjEwMAAAAAAAAAAAAAAA//tQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAABhgC7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7//////////////////////////////////////////////////////////////////8AAAAATGF2YzU4LjEzAAAAAAAAAAAAAAAAJAAAAAAAAAAAAYYoRwMHAAAAAAD/+1DEAAAH+ANoUAAABNQKbgzRQAIAAADSAAAAEBof5c/KAgCAIHygIAgfB8HwfB8oCAIAgCB8HwfB8HwfKAgCAIAgfB8HwfB8HygIAgCAIHwfB8HwfB8oCAIAgCB8HwfB8HwfKAgCAIAgfB8HwfB8HygIAgCAIHwfB8HwfB8oCAIAgCB8HwfB8HwfKAgCAIAgfB8HwfB8H/+1DEKYAAADSAMAAAAAAA0gAAAAAygIAgCAIHwfB8HwfB8oCAIAgCB8HwfB8HwfKAgCAIAgfB8HwfB8HygIAgCAIHwfB8HwfB8oCAIAgCB8HwfB8HwfKAgCAIAgfB8HwfB8HygIAgCAIHwfB8HwfB8oCAIAgCB8HwfB8HwfKAgCAIAgfB8HwfB8HygIAgCAIHw==';
-      audio.src = SILENCE;
+      audio.src = SILENCE_MP3;
       audio.volume = 1;
       const p = audio.play();
       if (p) {
@@ -106,7 +96,6 @@ export function useAudioPlayer() {
     const wavHeader = new ArrayBuffer(44);
     const view = new DataView(wavHeader);
     const byteRate = sampleRate * 2;
-    const blockAlign = 2;
     const dataSize = pcmData.byteLength;
 
     view.setUint32(0, 0x52494646, false); // "RIFF"
@@ -115,11 +104,11 @@ export function useAudioPlayer() {
     view.setUint32(12, 0x666d7420, false); // "fmt "
     view.setUint32(16, 16, true);
     view.setUint16(20, 1, true);
-    view.setUint16(22, 1, true); // mono
+    view.setUint16(22, 1, true);
     view.setUint32(24, sampleRate, true);
     view.setUint32(28, byteRate, true);
-    view.setUint16(32, blockAlign, true);
-    view.setUint16(34, 16, true); // 16-bit
+    view.setUint16(32, 2, true);
+    view.setUint16(34, 16, true);
     view.setUint32(36, 0x64617461, false); // "data"
     view.setUint32(40, dataSize, true);
 
@@ -137,16 +126,14 @@ export function useAudioPlayer() {
     return merged.buffer;
   }, []);
 
-  // Schedule PCM buffer via AudioContext for gapless playback (all platforms)
-  const playPcmChunk = useCallback((audioData: ArrayBuffer, sampleRate: number): boolean => {
+  // Desktop: AudioContext gapless scheduling
+  const playPcmViaContext = useCallback((audioData: ArrayBuffer, sampleRate: number): boolean => {
     const ACtx = window.AudioContext || (window as any).webkitAudioContext;
     if (!ACtx) return false;
 
     const ctx = ctxRef.current || new ACtx();
     ctxRef.current = ctx;
-    if (ctx.state === 'suspended') {
-      ctx.resume().catch(() => {});
-    }
+    if (ctx.state === 'suspended') ctx.resume().catch(() => {});
     if (ctx.state !== 'running') return false;
 
     const int16 = new Int16Array(audioData);
@@ -158,7 +145,6 @@ export function useAudioPlayer() {
 
     const buffer = ctx.createBuffer(1, float32.length, sampleRate);
     buffer.copyToChannel(float32, 0);
-
     const source = ctx.createBufferSource();
     source.buffer = buffer;
     source.connect(ctx.destination);
@@ -172,13 +158,13 @@ export function useAudioPlayer() {
         setIsPlaying(false);
       }
     };
-
     return true;
   }, []);
 
-  const playWavViaElement = useCallback((audioData: ArrayBuffer, sampleRate: number, onDone: () => void) => {
+  // Mobile + fallback: WAV via HTMLAudioElement
+  const playViaElement = useCallback((item: { data: ArrayBuffer; meta?: Record<string, unknown> }, sampleRate: number) => {
     const audio = getAudio();
-    const wavBlob = pcm16ToWav(audioData, sampleRate);
+    const wavBlob = pcm16ToWav(item.data, sampleRate);
     const wavUrl = URL.createObjectURL(wavBlob);
     currentUrlRef.current = wavUrl;
 
@@ -187,22 +173,22 @@ export function useAudioPlayer() {
       if (currentUrlRef.current === wavUrl) currentUrlRef.current = null;
     };
 
-    audio.onended = () => { cleanup(); onDone(); };
-    audio.onerror = () => { cleanup(); onDone(); };
+    audio.onended = () => { cleanup(); playNext(); };
+    audio.onerror = () => { cleanup(); playNext(); };
     audio.src = wavUrl;
     audio.load();
-    audio.play().catch((err) => {
-      console.warn('[AudioPlayer] WAV play() rejected:', err);
+    audio.play().catch(() => {
       cleanup();
+      queueRef.current.unshift(item);
       playingRef.current = false;
       setIsPlaying(false);
       if (!retryPlayTimerRef.current) {
         retryPlayTimerRef.current = setTimeout(() => {
           retryPlayTimerRef.current = null;
           if (queueRef.current.length > 0 && !playingRef.current) {
-            onDone();
+            playNext();
           }
-        }, 200);
+        }, 300);
       }
     });
   }, [getAudio, pcm16ToWav]);
@@ -214,7 +200,6 @@ export function useAudioPlayer() {
       return;
     }
 
-    ensureAudioReady();
     playingRef.current = true;
     setIsPlaying(true);
 
@@ -229,43 +214,34 @@ export function useAudioPlayer() {
     const isPcm = codec === 'pcm16le' || codec === 'linear16' || codec === 'pcm16';
 
     if (isPcm) {
-      // AudioContext gapless scheduling — só tenta se o contexto JÁ estiver ativo
-      // (evita ctx.resume() que interfere com HTMLAudioElement no iOS)
-      const ctx = ctxRef.current;
-      if (ctx?.state === 'running') {
-        const played = playPcmChunk(item.data, sampleRate);
-        if (played) {
-          if (queueRef.current.length > 0) playNext();
-          return;
+      // Desktop: AudioContext gapless
+      if (!isMobile) {
+        const ctx = ctxRef.current;
+        if (ctx?.state === 'running') {
+          const played = playPcmViaContext(item.data, sampleRate);
+          if (played) {
+            if (queueRef.current.length > 0) playNext();
+            return;
+          }
         }
       }
 
-      // WAV via HTMLAudioElement (confiável no iOS, usado até o AudioContext aquecer)
-      playWavViaElement(item.data, sampleRate, () => playNext());
+      // Mobile (primary) / Desktop (fallback): WAV via HTMLAudioElement
+      playViaElement(item, sampleRate);
       return;
     }
 
-    // MP3 path
+    // MP3
     const audio = getAudio();
     const blob = new Blob([item.data], { type: 'audio/mpeg' });
     const url = URL.createObjectURL(blob);
     currentUrlRef.current = url;
 
-    audio.onended = () => {
-      URL.revokeObjectURL(url);
-      currentUrlRef.current = null;
-      playNext();
-    };
-    audio.onerror = () => {
-      URL.revokeObjectURL(url);
-      currentUrlRef.current = null;
-      playNext();
-    };
-
+    audio.onended = () => { URL.revokeObjectURL(url); currentUrlRef.current = null; playNext(); };
+    audio.onerror = () => { URL.revokeObjectURL(url); currentUrlRef.current = null; playNext(); };
     audio.src = url;
     audio.load();
-    audio.play().catch((err) => {
-      console.warn('[AudioPlayer] play() rejected:', err);
+    audio.play().catch(() => {
       URL.revokeObjectURL(url);
       currentUrlRef.current = null;
       queueRef.current.unshift(item);
@@ -274,20 +250,17 @@ export function useAudioPlayer() {
       if (!retryPlayTimerRef.current) {
         retryPlayTimerRef.current = setTimeout(() => {
           retryPlayTimerRef.current = null;
-          if (queueRef.current.length > 0 && !playingRef.current) {
-            playNext();
-          }
-        }, 120);
+          if (queueRef.current.length > 0 && !playingRef.current) playNext();
+        }, 300);
       }
     });
-  }, [ensureAudioReady, getAudio, playPcmChunk, playWavViaElement]);
+  }, [getAudio, isMobile, playPcmViaContext, playViaElement]);
 
   const enqueue = useCallback((audioData: ArrayBuffer, meta?: Record<string, unknown>) => {
     const codec = (meta?.codec as string | undefined)?.toLowerCase();
     const isPcm = codec === 'pcm16le' || codec === 'linear16' || codec === 'pcm16';
     const sampleRate = Number(meta?.sampleRate) || 24000;
 
-    // Mobile: batch PCM chunks para reduzir overhead de scheduling
     if (isMobile && isPcm) {
       const bytes = new Uint8Array(audioData);
       pcmBatchRef.current.push(bytes);
@@ -304,58 +277,37 @@ export function useAudioPlayer() {
         });
         if (playingRef.current) return;
         if (!mobilePrimedRef.current) {
-          if (queueRef.current.length < MIN_QUEUE_TO_START) return;
+          if (queueRef.current.length < 1) return;
           mobilePrimedRef.current = true;
         }
         playNext();
       };
 
       if (pcmBatchBytesRef.current >= PCM_BATCH_BYTES) {
-        if (pcmBatchTimerRef.current) {
-          clearTimeout(pcmBatchTimerRef.current);
-          pcmBatchTimerRef.current = null;
-        }
+        if (pcmBatchTimerRef.current) { clearTimeout(pcmBatchTimerRef.current); pcmBatchTimerRef.current = null; }
         flushBatch();
       } else if (!pcmBatchTimerRef.current) {
-        pcmBatchTimerRef.current = setTimeout(() => {
-          pcmBatchTimerRef.current = null;
-          flushBatch();
-        }, PCM_FLUSH_MS);
+        pcmBatchTimerRef.current = setTimeout(() => { pcmBatchTimerRef.current = null; flushBatch(); }, PCM_FLUSH_MS);
       }
       return;
     }
 
     queueRef.current.push({ data: audioData, meta });
-
-    if (isPcm || !playingRef.current) {
-      playNext();
-    }
-  }, [concatUint8, isMobile, playNext, PCM_BATCH_BYTES, PCM_FLUSH_MS, MIN_QUEUE_TO_START]);
+    if (isPcm || !playingRef.current) playNext();
+  }, [concatUint8, isMobile, playNext, PCM_BATCH_BYTES, PCM_FLUSH_MS]);
 
   const stop = useCallback(() => {
     queueRef.current = [];
     pcmBatchRef.current = [];
     pcmBatchBytesRef.current = 0;
     mobilePrimedRef.current = false;
-    if (pcmBatchTimerRef.current) {
-      clearTimeout(pcmBatchTimerRef.current);
-      pcmBatchTimerRef.current = null;
-    }
-    if (retryPlayTimerRef.current) {
-      clearTimeout(retryPlayTimerRef.current);
-      retryPlayTimerRef.current = null;
-    }
+    if (pcmBatchTimerRef.current) { clearTimeout(pcmBatchTimerRef.current); pcmBatchTimerRef.current = null; }
+    if (retryPlayTimerRef.current) { clearTimeout(retryPlayTimerRef.current); retryPlayTimerRef.current = null; }
     playingRef.current = false;
     setIsPlaying(false);
     const audio = audioRef.current;
-    if (audio) {
-      audio.pause();
-      audio.src = '';
-    }
-    if (currentUrlRef.current) {
-      URL.revokeObjectURL(currentUrlRef.current);
-      currentUrlRef.current = null;
-    }
+    if (audio) { audio.pause(); audio.src = ''; }
+    if (currentUrlRef.current) { URL.revokeObjectURL(currentUrlRef.current); currentUrlRef.current = null; }
     nextStartRef.current = 0;
   }, []);
 

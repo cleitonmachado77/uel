@@ -103,13 +103,10 @@ export default function StudentPage() {
     if (joiningRef.current) return;
     joiningRef.current = true;
 
-    // Seleciona imediatamente no primeiro toque/click.
     setConnected(true);
     setCurrentSession(session);
-    try {
-      // Em mobile, o unlock precisa completar dentro do gesto do usuário.
-      await initPlayer();
-    } catch (_) {}
+    // Dispara unlock de áudio dentro do gesto (não bloqueia com await)
+    initPlayer().catch(() => {});
 
     const connectWs = async () => {
       const ws = new WSClient({
