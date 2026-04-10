@@ -39,6 +39,7 @@ export default function StudentPage() {
   const targetLangRef = useRef(targetLang);
   const [loading, setLoading] = useState(true);
   const wsRef = useRef<WSClient | null>(null);
+  const joiningRef = useRef(false);
   const { isPlaying, enqueue, stop: stopPlayer, init: initPlayer } = useAudioPlayer();
 
   // Busca sessões ativas
@@ -99,12 +100,13 @@ export default function StudentPage() {
   }, []);
 
   const joinSession = async (session: Session) => {
-    // Desbloqueia AudioContext DENTRO do gesto e AGUARDA ficar running
-    await initPlayer();
+    if (joiningRef.current) return;
+    joiningRef.current = true;
 
-    // Mostra o player
+    // Seleciona imediatamente no primeiro toque/click.
     setConnected(true);
     setCurrentSession(session);
+    initPlayer().catch(() => {});
 
     const connectWs = async () => {
       const ws = new WSClient({
@@ -146,7 +148,11 @@ export default function StudentPage() {
 
     // Marca wsRef como ativo para permitir reconexão
     wsRef.current = {} as any;
-    await connectWs();
+    try {
+      await connectWs();
+    } finally {
+      joiningRef.current = false;
+    }
   };
 
   // Re-desbloqueia áudio ao tocar na tela (iOS pode suspender ao perder foco)
@@ -160,6 +166,7 @@ export default function StudentPage() {
   const leaveSession = () => {
     const ws = wsRef.current;
     wsRef.current = null; // Para a reconexão automática
+    joiningRef.current = false;
     stopPlayer();
     ws?.disconnect();
     setConnected(false);

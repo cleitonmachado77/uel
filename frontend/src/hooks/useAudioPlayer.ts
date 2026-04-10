@@ -212,7 +212,8 @@ export function useAudioPlayer() {
     const sampleRate = Number(item.meta?.sampleRate) || 24000;
     const isPcm = codec === 'pcm16le' || codec === 'linear16' || codec === 'pcm16';
     if (isPcm) {
-      const played = playPcmChunk(item.data, sampleRate);
+      // Mobile: prioriza WAV + HTMLAudioElement (mais compatível que AudioContext)
+      const played = !isMobile && playPcmChunk(item.data, sampleRate);
       if (played) {
         if (queueRef.current.length > 0) playNext();
         return;
