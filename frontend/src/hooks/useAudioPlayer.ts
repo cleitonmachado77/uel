@@ -28,6 +28,7 @@ export function useAudioPlayer() {
   const MOBILE_PCM_BATCH_BYTES = 9600; // ~200ms @ 24kHz mono 16-bit
   const MOBILE_PCM_FLUSH_MS = 120;
   const MOBILE_MIN_QUEUE_TO_START = 1;
+  const MOBILE_WAV_TARGET_BYTES = 16800; // ~350ms para reduzir gaps no HTMLAudio
 
   const getAudio = useCallback((): HTMLAudioElement => {
     if (!audioRef.current) {
@@ -218,8 +219,28 @@ export function useAudioPlayer() {
         if (queueRef.current.length > 0) playNext();
         return;
       }
+
+      // Coalescência mobile: junta chunks PCM consecutivos para evitar "picotes"
+      // causados por troca frequente de src no HTMLAudioElement.
+      let mergedData = item.data;
+      if (isMobile) {
+        const chunks = [new Uint8Array(item.data)];
+        let totalBytes = item.data.byteLength;
+        while (queueRef.current.length > 0 && totalBytes < MOBILE_WAV_TARGET_BYTES) {
+          const peek = queueRef.current[0];
+          const peekCodec = (peek.meta?.codec as string | undefined)?.toLowerCase();
+          const peekIsPcm = peekCodec === 'pcm16le' || peekCodec === 'linear16' || peekCodec === 'pcm16';
+          const peekRate = Number(peek.meta?.sampleRate) || sampleRate;
+          if (!peekIsPcm || peekRate !== sampleRate) break;
+          const next = queueRef.current.shift()!;
+          chunks.push(new Uint8Array(next.data));
+          totalBytes += next.data.byteLength;
+        }
+        mergedData = concatUint8(chunks);
+      }
+
       // Fallback para mobile: encapsula PCM em WAV e reproduz via HTMLAudioElement.
-      const wavBlob = pcm16ToWav(item.data, sampleRate);
+      const wavBlob = pcm16ToWav(mergedData, sampleRate);
       const wavUrl = URL.createObjectURL(wavBlob);
       currentUrlRef.current = wavUrl;
       audio.onended = () => {
@@ -269,7 +290,7 @@ export function useAudioPlayer() {
       playingRef.current = false;
       setIsPlaying(false);
     });
-  }, [ensureAudioReady, getAudio, isMobile, pcm16ToWav, playPcmChunk]);
+  }, [concatUint8, ensureAudioReady, getAudio, isMobile, pcm16ToWav, playPcmChunk]);
 
   const enqueue = useCallback((audioData: ArrayBuffer, meta?: Record<string, unknown>) => {
     const codec = (meta?.codec as string | undefined)?.toLowerCase();
