@@ -12,10 +12,10 @@ function detectMobile(): boolean {
 /**
  * Player de áudio para mobile e desktop.
  *
- * Estratégia por plataforma:
- * - Desktop: AudioContext com BufferSource agendados (gapless scheduling)
- * - Mobile/iPad: PCM batched → WAV blob → HTMLAudioElement (mais confiável no iOS Safari)
- * - Fila sequencial com pre-buffering no mobile para evitar cortes
+ * Estratégia:
+ * - AudioContext com BufferSource agendados (gapless scheduling) em todas as plataformas
+ * - Mobile: PCM é batched antes de agendar para reduzir overhead
+ * - WAV via HTMLAudioElement apenas como fallback se AudioContext não estiver disponível
  */
 export function useAudioPlayer() {
   const [isPlaying, setIsPlaying] = useState(false);
@@ -34,10 +34,10 @@ export function useAudioPlayer() {
 
   const isMobile = detectMobile();
 
-  // Mobile usa batches maiores para reduzir gaps entre reproduções via HTMLAudioElement
-  const PCM_BATCH_BYTES = isMobile ? 24000 : 9600;  // ~500ms vs ~200ms @ 24kHz mono 16-bit
-  const PCM_FLUSH_MS = isMobile ? 300 : 120;
-  const MIN_QUEUE_TO_START = isMobile ? 2 : 1;
+  // Mobile batcha PCM para reduzir overhead de scheduling no AudioContext
+  const PCM_BATCH_BYTES = isMobile ? 14400 : 9600;  // ~300ms vs ~200ms @ 24kHz mono 16-bit
+  const PCM_FLUSH_MS = isMobile ? 200 : 120;
+  const MIN_QUEUE_TO_START = 1;
 
   const getAudio = useCallback((): HTMLAudioElement => {
     if (!audioRef.current) {
@@ -137,7 +137,7 @@ export function useAudioPlayer() {
     return merged.buffer;
   }, []);
 
-  // Desktop: schedule PCM buffer via AudioContext for gapless playback
+  // Schedule PCM buffer via AudioContext for gapless playback (all platforms)
   const playPcmChunk = useCallback((audioData: ArrayBuffer, sampleRate: number): boolean => {
     const ACtx = window.AudioContext || (window as any).webkitAudioContext;
     if (!ACtx) return false;
@@ -229,20 +229,14 @@ export function useAudioPlayer() {
     const isPcm = codec === 'pcm16le' || codec === 'linear16' || codec === 'pcm16';
 
     if (isPcm) {
-      // Mobile/iPad: WAV via HTMLAudioElement (batched chunks já são grandes o suficiente)
-      if (isMobile) {
-        playWavViaElement(item.data, sampleRate, () => playNext());
-        return;
-      }
-
-      // Desktop: AudioContext scheduling
+      // AudioContext gapless scheduling (todas as plataformas)
       const played = playPcmChunk(item.data, sampleRate);
       if (played) {
         if (queueRef.current.length > 0) playNext();
         return;
       }
 
-      // Desktop fallback: WAV via HTMLAudioElement
+      // Fallback: WAV via HTMLAudioElement (quando AudioContext não está running)
       playWavViaElement(item.data, sampleRate, () => playNext());
       return;
     }
@@ -282,14 +276,14 @@ export function useAudioPlayer() {
         }, 120);
       }
     });
-  }, [ensureAudioReady, getAudio, isMobile, playPcmChunk, playWavViaElement]);
+  }, [ensureAudioReady, getAudio, playPcmChunk, playWavViaElement]);
 
   const enqueue = useCallback((audioData: ArrayBuffer, meta?: Record<string, unknown>) => {
     const codec = (meta?.codec as string | undefined)?.toLowerCase();
     const isPcm = codec === 'pcm16le' || codec === 'linear16' || codec === 'pcm16';
     const sampleRate = Number(meta?.sampleRate) || 24000;
 
-    // Mobile: batch PCM chunks into larger segments for smooth HTMLAudioElement playback
+    // Mobile: batch PCM chunks para reduzir overhead de scheduling
     if (isMobile && isPcm) {
       const bytes = new Uint8Array(audioData);
       pcmBatchRef.current.push(bytes);
