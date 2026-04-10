@@ -113,6 +113,31 @@ export async function syncListenerCount(sessionId, count) {
 }
 
 /**
+ * Encerra todas as sessões 'live' no banco (limpeza de sessões órfãs ao reiniciar o servidor)
+ */
+export async function cleanupStaleSessions() {
+  const { data, error } = await supabase
+    .from('sessions')
+    .update({
+      status: 'ended',
+      ended_at: new Date().toISOString(),
+    })
+    .eq('status', 'live')
+    .select('id');
+
+  if (error) {
+    console.error('Erro ao limpar sessões órfãs:', error.message);
+    return 0;
+  }
+
+  const count = data?.length || 0;
+  if (count > 0) {
+    console.log(`[Startup] ${count} sessão(ões) órfã(s) encerrada(s)`);
+  }
+  return count;
+}
+
+/**
  * Valida token JWT do Supabase Auth
  */
 export async function validateToken(token) {

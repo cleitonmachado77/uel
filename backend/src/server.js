@@ -58,6 +58,12 @@ app.get('/api/sessions', async (_req, res) => {
 setupWebSocket(server);
 
 const PORT = process.env.PORT || 3001;
-server.listen(PORT, '0.0.0.0', () => {
+server.listen(PORT, '0.0.0.0', async () => {
   console.log(`UEL Connect backend running on port ${PORT}`);
+  try {
+    const { cleanupStaleSessions } = await import('./services/supabase.js');
+    await cleanupStaleSessions();
+  } catch (err) {
+    console.warn('Cleanup de sessões falhou:', err.message);
+  }
 });
