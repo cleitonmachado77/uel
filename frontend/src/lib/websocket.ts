@@ -25,7 +25,7 @@ export type WSMessage = {
 
 export type WSEventHandler = {
   onMessage?: (msg: WSMessage) => void;
-  onAudio?: (data: ArrayBuffer) => void;
+  onAudio?: (data: ArrayBuffer, meta?: Record<string, unknown>) => void;
   onClose?: () => void;
   onError?: (err: Event) => void;
 };
@@ -77,14 +77,19 @@ export class WSClient {
           if (msg.type === 'pong') return;
 
           // Áudio enviado como base64 dentro de JSON
-          if (msg.type === 'audio' && msg.data) {
+          if ((msg.type === 'audio' || msg.type === 'audio_chunk') && msg.data) {
             try {
               const binaryStr = atob(msg.data as string);
               const bytes = new Uint8Array(binaryStr.length);
               for (let i = 0; i < binaryStr.length; i++) {
                 bytes[i] = binaryStr.charCodeAt(i);
               }
-              this.handlers.onAudio?.(bytes.buffer);
+              this.handlers.onAudio?.(bytes.buffer, {
+                codec: msg.codec,
+                sampleRate: msg.sampleRate,
+                channels: msg.channels,
+                source: msg.source,
+              });
             } catch (e) {
               console.warn('Failed to decode audio base64:', e);
             }

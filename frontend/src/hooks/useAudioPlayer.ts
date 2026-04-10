@@ -12,10 +12,12 @@ import { useRef, useCallback, useState } from 'react';
 export function useAudioPlayer() {
   const [isPlaying, setIsPlaying] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
-  const queueRef = useRef<ArrayBuffer[]>([]);
+  const queueRef = useRef<Array<{ data: ArrayBuffer; meta?: Record<string, unknown> }>>([]);
   const playingRef = useRef(false);
   const unlockedRef = useRef(false);
   const currentUrlRef = useRef<string | null>(null);
+  const ctxRef = useRef<AudioContext | null>(null);
+  const nextStartRef = useRef(0);
 
   const getAudio = useCallback((): HTMLAudioElement => {
     if (!audioRef.current) {
@@ -40,15 +42,14 @@ export function useAudioPlayer() {
       try {
         const ACtx = window.AudioContext || (window as any).webkitAudioContext;
         if (ACtx) {
-          const ctx = new ACtx();
+          const ctx = ctxRef.current || new ACtx();
+          ctxRef.current = ctx;
           const buf = ctx.createBuffer(1, 1, 22050);
           const src = ctx.createBufferSource();
           src.buffer = buf;
           src.connect(ctx.destination);
           src.start(0);
-          ctx.resume().then(() => {
-            ctx.close();
-          }).catch(() => {});
+          ctx.resume().catch(() => {});
         }
       } catch (_) {}
 
@@ -75,6 +76,43 @@ export function useAudioPlayer() {
     });
   }, [getAudio]);
 
+  const playPcmChunk = useCallback((audioData: ArrayBuffer, sampleRate: number) => {
+    const ACtx = window.AudioContext || (window as any).webkitAudioContext;
+    if (!ACtx) return false;
+
+    const ctx = ctxRef.current || new ACtx();
+    ctxRef.current = ctx;
+    if (ctx.state === 'suspended') {
+      ctx.resume().catch(() => {});
+    }
+
+    const int16 = new Int16Array(audioData);
+    if (int16.length === 0) return true;
+    const float32 = new Float32Array(int16.length);
+    for (let i = 0; i < int16.length; i++) {
+      float32[i] = int16[i] / 32768;
+    }
+
+    const buffer = ctx.createBuffer(1, float32.length, sampleRate);
+    buffer.copyToChannel(float32, 0);
+
+    const source = ctx.createBufferSource();
+    source.buffer = buffer;
+    source.connect(ctx.destination);
+
+    const startAt = Math.max(ctx.currentTime + 0.01, nextStartRef.current);
+    source.start(startAt);
+    nextStartRef.current = startAt + buffer.duration;
+    source.onended = () => {
+      if (queueRef.current.length === 0 && ctx.currentTime >= nextStartRef.current - 0.02) {
+        playingRef.current = false;
+        setIsPlaying(false);
+      }
+    };
+
+    return true;
+  }, []);
+
   const playNext = useCallback(() => {
     if (queueRef.current.length === 0) {
       playingRef.current = false;
@@ -92,8 +130,18 @@ export function useAudioPlayer() {
       currentUrlRef.current = null;
     }
 
-    const audioData = queueRef.current.shift()!;
-    const blob = new Blob([audioData], { type: 'audio/mpeg' });
+    const item = queueRef.current.shift()!;
+    const codec = (item.meta?.codec as string | undefined)?.toLowerCase();
+    const sampleRate = Number(item.meta?.sampleRate) || 24000;
+    if (codec === 'pcm16le' || codec === 'linear16' || codec === 'pcm16') {
+      const played = playPcmChunk(item.data, sampleRate);
+      if (played) {
+        if (queueRef.current.length > 0) playNext();
+        return;
+      }
+    }
+
+    const blob = new Blob([item.data], { type: 'audio/mpeg' });
     const url = URL.createObjectURL(blob);
     currentUrlRef.current = url;
 
@@ -116,11 +164,19 @@ export function useAudioPlayer() {
       currentUrlRef.current = null;
       playNext();
     });
-  }, [getAudio]);
+  }, [getAudio, playPcmChunk]);
 
-  const enqueue = useCallback((audioData: ArrayBuffer) => {
-    queueRef.current.push(audioData);
-    if (!playingRef.current) playNext();
+  const enqueue = useCallback((audioData: ArrayBuffer, meta?: Record<string, unknown>) => {
+    queueRef.current.push({ data: audioData, meta });
+
+    const codec = (meta?.codec as string | undefined)?.toLowerCase();
+    const isPcm = codec === 'pcm16le' || codec === 'linear16' || codec === 'pcm16';
+
+    // Para PCM em streaming, precisamos continuar agendando mesmo já "tocando".
+    // Para MP3 legada, mantemos fluxo sequencial via onended.
+    if (isPcm || !playingRef.current) {
+      playNext();
+    }
   }, [playNext]);
 
   const stop = useCallback(() => {
@@ -136,6 +192,7 @@ export function useAudioPlayer() {
       URL.revokeObjectURL(currentUrlRef.current);
       currentUrlRef.current = null;
     }
+    nextStartRef.current = 0;
   }, []);
 
   return { isPlaying, enqueue, stop, init };

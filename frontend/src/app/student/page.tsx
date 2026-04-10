@@ -116,8 +116,8 @@ export default function StudentPage() {
             leaveSession();
           }
         },
-        onAudio: (data: ArrayBuffer) => {
-          enqueue(data);
+        onAudio: (data: ArrayBuffer, meta?: Record<string, unknown>) => {
+          enqueue(data, meta);
         },
         onClose: () => {
           setTimeout(() => {

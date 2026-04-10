@@ -1,7 +1,5 @@
 import { WebSocketServer } from "ws";
-import { createDeepgramStream } from "../services/stt.js";
-import { translateAndSpeak } from "../services/pipeline.js";
-import { synthesizeSpeech } from "../services/tts.js";
+import { createRealtimeTranslator } from "../services/realtime-translator.js";
 import { createSession, endSession, joinSessionDB, leaveSessionDB, syncListenerCount, validateToken } from "../services/supabase.js";
 
 const activeSessions = new Map();
@@ -58,38 +56,75 @@ export function setupWebSocket(server) {
   console.log("WebSocket server ready");
 }
 
-function openDeepgramStream(sessionId) {
+function openRealtimeStream(sessionId) {
   const session = activeSessions.get(sessionId);
-  if (!session || session.dgBlocked) return;
+  if (!session || session.rtBlocked) return;
 
-  if (session.dgStream) {
-    try { session.dgStream.close(); } catch (_) {}
-    session.dgStream = null;
+  if (session.rtStream) {
+    try { session.rtStream.close(); } catch (_) {}
+    session.rtStream = null;
   }
 
-  session.dgStream = createDeepgramStream(
-    session.language,
-    (transcript, isFinal) => onTranscript(sessionId, transcript, isFinal),
-    (err) => {
-      console.error(`[Session ${sessionId}] DG error:`, err.message);
-      session.dgStream = null;
-      if (err.message && err.message.includes("400")) {
-        console.error(`[Session ${sessionId}] Erro 400 - verifique a API key do Deepgram`);
-        session.dgBlocked = true; // bloqueia reconexão
-        return;
-      }
-      setTimeout(() => {
-        if (activeSessions.has(sessionId)) openDeepgramStream(sessionId);
-      }, 1000);
+  session.rtStream = createRealtimeTranslator(
+    {
+      initialTargetLang: session.currentTargetLang || "en",
+      onAudioDelta: (audioChunk) => onOutputAudio(sessionId, audioChunk),
+      onTranscriptDelta: (deltaText) => onOutputTranscript(sessionId, deltaText),
+      onConnected: () => console.log(`[Session ${sessionId}] Inworld Realtime conectado`),
+      onDebug: (msg) => console.log(msg),
+      onError: (err) => {
+        console.error(`[Session ${sessionId}] Inworld error:`, err.message);
+        session.rtStream = null;
+        if (err.message && err.message.toLowerCase().includes("auth")) {
+          session.rtBlocked = true;
+          return;
+        }
+        setTimeout(() => {
+          if (activeSessions.has(sessionId)) openRealtimeStream(sessionId);
+        }, 1000);
+      },
     }
   );
+}
+
+function onOutputTranscript(sessionId, transcriptDelta) {
+  const session = activeSessions.get(sessionId);
+  if (!session || !transcriptDelta) return;
+  if (session.professorWs?.readyState === 1) {
+    session.professorWs.send(JSON.stringify({
+      type: "translated_transcript_delta",
+      text: transcriptDelta,
+    }));
+  }
+}
+
+function onOutputAudio(sessionId, audioChunk) {
+  const session = activeSessions.get(sessionId);
+  const lingering = lingeringSessions.get(sessionId);
+  const listeners = session?.listeners || lingering?.listeners;
+  if (!listeners || listeners.size === 0) return;
+
+  const data = Buffer.from(audioChunk).toString("base64");
+  for (const [lws, info] of listeners) {
+    const lang = info.targetLang || "en";
+    if (lang === (session?.language || lingering?.language)) continue;
+    if (lws.readyState !== 1) continue;
+    lws.send(JSON.stringify({
+      type: "audio_chunk",
+      data,
+      codec: "pcm16le",
+      sampleRate: 24000,
+      channels: 1,
+      source: "inworld-realtime",
+    }));
+  }
 }
 
 async function closeSession(sessionId) {
   const session = activeSessions.get(sessionId);
   if (!session) return;
   lingeringSessions.set(sessionId, { listeners: new Map(session.listeners), language: session.language });
-  if (session.dgStream) { try { session.dgStream.close(); } catch (_) {} }
+  if (session.rtStream) { try { session.rtStream.close(); } catch (_) {} }
   activeSessions.delete(sessionId);
   syncListenerCount(sessionId, 0).catch(() => {});
   await endSession(sessionId);
@@ -99,91 +134,21 @@ async function closeSession(sessionId) {
   }, 4000);
 }
 
-// Warm-up: faz uma chamada TTS silenciosa para eliminar cold start
-async function warmupTTS() {
-  try {
-    await synthesizeSpeech("ok", "en");
-    console.log("[TTS] Warm-up concluído");
-  } catch (_) {}
-}
-
 function notifySessionEnded(sessionId) {
   const l = lingeringSessions.get(sessionId);
   if (!l) return;
   for (const [lws] of l.listeners) { try { lws.send(JSON.stringify({ type: "session_ended" })); } catch (_) {} }
 }
 
-async function onTranscript(sessionId, transcript, isFinal) {
-  const session = activeSessions.get(sessionId);
-  const lingering = lingeringSessions.get(sessionId);
-  const listeners = session?.listeners || lingering?.listeners;
-  const language = session?.language || lingering?.language;
-
-  if (!listeners || listeners.size === 0) return;
-
-  if (!isFinal) {
-    if (session?.professorWs?.readyState === 1) {
-      session.professorWs.send(JSON.stringify({ type: "transcript_interim", text: transcript }));
-    }
-    return;
-  }
-
-  console.log(`[Session ${sessionId}] Transcript final: "${transcript}"`);
-  if (session?.professorWs?.readyState === 1) {
-    session.professorWs.send(JSON.stringify({ type: "transcript_final", text: transcript }));
-  }
-
-  // Deduplicação: ignora se já está sendo processado
-  if (session) {
-    if (session._inFlight.has(transcript)) return;
-    session._inFlight.add(transcript);
-  }
-
-  // Processa em paralelo — sem fila serial
-  processTranscript(transcript, listeners, language).finally(() => {
-    session?._inFlight.delete(transcript);
-    if (!session && lingeringSessions.has(sessionId)) {
-      notifySessionEnded(sessionId);
-      lingeringSessions.delete(sessionId);
-    }
-  });
-}
-
-async function processTranscript(transcript, listeners, language) {
-  const neededLangs = new Set();
-  for (const [, info] of listeners) {
-    const lang = info.targetLang || "en";
-    if (lang !== language) neededLangs.add(lang);
-  }
-  if (neededLangs.size === 0) return;
-
-  const audioByLang = new Map();
-  await Promise.all([...neededLangs].map(async (tl) => {
-    try {
-      const a = await translateAndSpeak(transcript, language, tl);
-      if (a) audioByLang.set(tl, a);
-    } catch (err) { console.error(`[Pipeline] ${tl}:`, err.message); }
-  }));
-
-  for (const [lws, info] of listeners) {
-    const lang = info.targetLang || "en";
-    if (lang === language) continue;
-    const audio = audioByLang.get(lang);
-    if (audio && lws.readyState === 1) {
-      lws.send(JSON.stringify({ type: "audio", data: Buffer.from(audio).toString("base64") }));
-    }
-  }
-}
-
 function handleAudioData(sessionId, audioBuffer) {
   const session = activeSessions.get(sessionId);
-  if (!session || audioBuffer.length < 100 || session.dgBlocked) return;
+  if (!session || audioBuffer.length < 100 || session.rtBlocked) return;
 
-  if (!session.dgStream || session.dgStream.isClosed || session.dgStream.readyState > 1) {
-    openDeepgramStream(sessionId);
+  if (!session.rtStream || session.rtStream.isClosed || session.rtStream.readyState > 1) {
+    openRealtimeStream(sessionId);
   }
 
-  session.dgStream?.send(audioBuffer);
+  session.rtStream?.appendAudioChunk(audioBuffer);
 }
 
 async function handleControlMessage(ws, msg, userId, setRole) {
@@ -201,13 +166,11 @@ async function handleControlMessage(ws, msg, userId, setRole) {
           subject: dbSession.subject,
           language: dbSession.language,
           listeners: new Map(),
-          dgStream: null,
-          dgBlocked: false, // true quando Deepgram retorna 400 (API key inválida)
-          _inFlight: new Set(),
+          currentTargetLang: "en",
+          rtStream: null,
+          rtBlocked: false,
         });
-        openDeepgramStream(sessionId);
-        // Warm-up do TTS: elimina cold start da primeira fala
-        warmupTTS().catch(() => {});
+        openRealtimeStream(sessionId);
         setRole("professor", sessionId);
         ws.send(JSON.stringify({ type: "session_created", sessionId }));
         console.log(`[Session ${sessionId}] criada por ${msg.professorName}`);
@@ -233,6 +196,8 @@ async function handleControlMessage(ws, msg, userId, setRole) {
         }
       }
       session.listeners.set(ws, { studentId, targetLang });
+      session.currentTargetLang = targetLang;
+      session.rtStream?.updateTargetLanguage(targetLang, { forceReconnect: true });
       setRole("student", msg.sessionId);
       ws.send(JSON.stringify({ type: "joined", professorName: session.professorName, subject: session.subject }));
       syncListenerCount(msg.sessionId, session.listeners.size).catch(() => {});
@@ -243,7 +208,12 @@ async function handleControlMessage(ws, msg, userId, setRole) {
       const lang = msg.language || "en";
       for (const [, session] of activeSessions) {
         const info = session.listeners.get(ws);
-        if (info) { info.targetLang = lang; break; }
+        if (info) {
+          info.targetLang = lang;
+          session.currentTargetLang = lang;
+          session.rtStream?.updateTargetLanguage(lang, { forceReconnect: true });
+          break;
+        }
       }
       ws.send(JSON.stringify({ type: "language_set", language: lang }));
       break;
