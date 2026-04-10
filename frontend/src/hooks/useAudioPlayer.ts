@@ -31,8 +31,9 @@ export function useAudioPlayer() {
 
   const isMobile = detectMobile();
 
-  const PCM_BATCH_BYTES = isMobile ? 19200 : 9600;  // ~400ms vs ~200ms @ 24kHz mono 16-bit
-  const PCM_FLUSH_MS = isMobile ? 250 : 120;
+  const PCM_BATCH_BYTES = isMobile ? 28800 : 9600;  // ~600ms vs ~200ms @ 24kHz mono 16-bit
+  const PCM_FLUSH_MS = isMobile ? 400 : 120;
+  const MOBILE_MERGE_MAX = 96000; // mescla PCM consecutivos na fila (até ~2s) para menos transições
 
   const SILENCE_MP3 = 'data:audio/mp3;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4Ljc2LjEwMAAAAAAAAAAAAAAA//tQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAABhgC7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7//////////////////////////////////////////////////////////////////8AAAAATGF2YzU4LjEzAAAAAAAAAAAAAAAAJAAAAAAAAAAAAYYoRwMHAAAAAAD/+1DEAAAH+ANoUAAABNQKbgzRQAIAAADSAAAAEBof5c/KAgCAIHygIAgfB8HwfB8oCAIAgCB8HwfB8HwfKAgCAIAgfB8HwfB8HygIAgCAIHwfB8HwfB8oCAIAgCB8HwfB8HwfKAgCAIAgfB8HwfB8HygIAgCAIHwfB8HwfB8oCAIAgCB8HwfB8HwfKAgCAIAgfB8HwfB8H/+1DEKYAAADSAMAAAAAAA0gAAAAAygIAgCAIHwfB8HwfB8oCAIAgCB8HwfB8HwfKAgCAIAgfB8HwfB8HygIAgCAIHwfB8HwfB8oCAIAgCB8HwfB8HwfKAgCAIAgfB8HwfB8HygIAgCAIHwfB8HwfB8oCAIAgCB8HwfB8HwfKAgCAIAgfB8HwfB8HygIAgCAIHw==';
 
@@ -226,8 +227,29 @@ export function useAudioPlayer() {
         }
       }
 
-      // Mobile (primary) / Desktop (fallback): WAV via HTMLAudioElement
-      playViaElement(item, sampleRate);
+      // Mobile: mescla itens PCM consecutivos na fila em um único WAV grande
+      let finalData = item.data;
+      if (isMobile && queueRef.current.length > 0) {
+        const chunks = [new Uint8Array(item.data)];
+        let totalBytes = item.data.byteLength;
+        while (queueRef.current.length > 0 && totalBytes < MOBILE_MERGE_MAX) {
+          const next = queueRef.current[0];
+          const nc = (next.meta?.codec as string | undefined)?.toLowerCase();
+          if (nc === 'pcm16le' || nc === 'linear16' || nc === 'pcm16') {
+            const shifted = queueRef.current.shift()!;
+            chunks.push(new Uint8Array(shifted.data));
+            totalBytes += shifted.data.byteLength;
+          } else break;
+        }
+        if (chunks.length > 1) {
+          const merged = new Uint8Array(totalBytes);
+          let off = 0;
+          for (const c of chunks) { merged.set(c, off); off += c.byteLength; }
+          finalData = merged.buffer;
+        }
+      }
+
+      playViaElement({ data: finalData, meta: item.meta }, sampleRate);
       return;
     }
 
