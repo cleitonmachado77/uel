@@ -21,6 +21,7 @@ export function useAudioPlayer() {
   const pcmBatchRef = useRef<Uint8Array[]>([]);
   const pcmBatchBytesRef = useRef(0);
   const pcmBatchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const retryPlayTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mobilePrimedRef = useRef(false);
 
   const isMobile = typeof navigator !== 'undefined'
@@ -102,12 +103,12 @@ export function useAudioPlayer() {
           console.log('[AudioPlayer] unlocked');
           resolve();
         }).catch(() => {
-          // Mesmo falhando, marca como desbloqueado para tentar reproduzir
-          unlockedRef.current = true;
+          // Mantém bloqueado para permitir novas tentativas em interações futuras.
+          unlockedRef.current = false;
           resolve();
         });
       } else {
-        unlockedRef.current = true;
+        unlockedRef.current = false;
         resolve();
       }
     });
@@ -261,6 +262,14 @@ export function useAudioPlayer() {
         queueRef.current.unshift(item);
         playingRef.current = false;
         setIsPlaying(false);
+        if (!retryPlayTimerRef.current) {
+          retryPlayTimerRef.current = setTimeout(() => {
+            retryPlayTimerRef.current = null;
+            if (queueRef.current.length > 0 && !playingRef.current) {
+              playNext();
+            }
+          }, 120);
+        }
       });
       return;
     }
@@ -289,6 +298,14 @@ export function useAudioPlayer() {
       queueRef.current.unshift(item);
       playingRef.current = false;
       setIsPlaying(false);
+      if (!retryPlayTimerRef.current) {
+        retryPlayTimerRef.current = setTimeout(() => {
+          retryPlayTimerRef.current = null;
+          if (queueRef.current.length > 0 && !playingRef.current) {
+            playNext();
+          }
+        }, 120);
+      }
     });
   }, [concatUint8, ensureAudioReady, getAudio, isMobile, pcm16ToWav, playPcmChunk]);
 
@@ -357,6 +374,10 @@ export function useAudioPlayer() {
     if (pcmBatchTimerRef.current) {
       clearTimeout(pcmBatchTimerRef.current);
       pcmBatchTimerRef.current = null;
+    }
+    if (retryPlayTimerRef.current) {
+      clearTimeout(retryPlayTimerRef.current);
+      retryPlayTimerRef.current = null;
     }
     playingRef.current = false;
     setIsPlaying(false);
