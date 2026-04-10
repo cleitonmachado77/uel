@@ -25,8 +25,8 @@ export function useAudioPlayer() {
 
   const isMobile = typeof navigator !== 'undefined'
     && /android|iphone|ipad|ipod|mobile/i.test(navigator.userAgent);
-  const MOBILE_PCM_BATCH_BYTES = 7200; // ~150ms @ 24kHz mono 16-bit
-  const MOBILE_PCM_FLUSH_MS = 90;
+  const MOBILE_PCM_BATCH_BYTES = 9600; // ~200ms @ 24kHz mono 16-bit
+  const MOBILE_PCM_FLUSH_MS = 120;
   const MOBILE_MIN_QUEUE_TO_START = 1;
 
   const getAudio = useCallback((): HTMLAudioElement => {
@@ -243,11 +243,8 @@ export function useAudioPlayer() {
     const codec = (meta?.codec as string | undefined)?.toLowerCase();
     const isPcm = codec === 'pcm16le' || codec === 'linear16' || codec === 'pcm16';
     const sampleRate = Number(meta?.sampleRate) || 24000;
-    const ctxState = ctxRef.current?.state;
-    const canStreamPcmDirect = !isMobile || ctxState === 'running';
-
-    // Mobile: agrupa micro-chunks PCM para evitar reprodução "muda" em blocos curtos.
-    if (isMobile && isPcm && !canStreamPcmDirect) {
+    // Mobile: agrupa micro-chunks PCM para reduzir cortes por underrun.
+    if (isMobile && isPcm) {
       const bytes = new Uint8Array(audioData);
       pcmBatchRef.current.push(bytes);
       pcmBatchBytesRef.current += bytes.byteLength;

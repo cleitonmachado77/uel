@@ -22,7 +22,7 @@ function buildTranslatorInstructions(targetLang) {
   const strictTargetRule = targetLang === 'fr'
     ? 'Responda SOMENTE em francês (França). Nunca use inglês.'
     : `Responda SOMENTE em ${humanTarget}. Nunca use inglês, exceto se o idioma alvo for inglês.`;
-  return `Você é um tradutor simultâneo profissional. O usuário fala em português (Brasil). Traduza imediatamente tudo que ele disser para ${humanTarget}, falando de forma natural, fluida e mantendo o tom emocional original. Seja conciso e natural. Nunca adicione explicações. Responda sempre em voz falada. ${strictTargetRule}`;
+  return `Você é um tradutor simultâneo profissional. O usuário fala em português (Brasil). Traduza imediatamente tudo que ele disser para ${humanTarget}, falando de forma natural, fluida e mantendo o tom emocional original. Seja conciso e natural. Nunca adicione explicações. Responda sempre em voz falada. Nunca diga a palavra "Voice" ou "voz". ${strictTargetRule}`;
 }
 
 function buildSessionUpdate({ instructions, voice, speed }) {
