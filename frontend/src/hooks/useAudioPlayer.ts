@@ -43,6 +43,32 @@ export function useAudioPlayer() {
     return audioRef.current;
   }, []);
 
+  const ensureAudioReady = useCallback(() => {
+    try {
+      const ctx = ctxRef.current;
+      if (ctx?.state === 'suspended') {
+        ctx.resume().catch(() => {});
+      }
+    } catch (_) {}
+
+    // Reforça desbloqueio em mobile sem emitir som audível.
+    const audio = getAudio();
+    audio.muted = true;
+    const p = audio.play();
+    if (p) {
+      p.then(() => {
+        audio.pause();
+        audio.currentTime = 0;
+        audio.muted = false;
+        unlockedRef.current = true;
+      }).catch(() => {
+        audio.muted = false;
+      });
+    } else {
+      audio.muted = false;
+    }
+  }, [getAudio]);
+
   // Desbloqueia autoplay tocando 1 frame de silêncio dentro do gesto do usuário
   const init = useCallback((): Promise<void> => {
     return new Promise((resolve) => {
@@ -170,6 +196,7 @@ export function useAudioPlayer() {
       return;
     }
 
+    ensureAudioReady();
     const audio = getAudio();
     playingRef.current = true;
     setIsPlaying(true);
@@ -209,7 +236,9 @@ export function useAudioPlayer() {
       audio.play().catch(() => {
         URL.revokeObjectURL(wavUrl);
         currentUrlRef.current = null;
-        playNext();
+        queueRef.current.unshift(item);
+        playingRef.current = false;
+        setIsPlaying(false);
       });
       return;
     }
@@ -235,14 +264,20 @@ export function useAudioPlayer() {
       console.warn('[AudioPlayer] play() rejected:', err);
       URL.revokeObjectURL(url);
       currentUrlRef.current = null;
-      playNext();
+      queueRef.current.unshift(item);
+      playingRef.current = false;
+      setIsPlaying(false);
     });
-  }, [getAudio, isMobile, pcm16ToWav, playPcmChunk]);
+  }, [ensureAudioReady, getAudio, isMobile, pcm16ToWav, playPcmChunk]);
 
   const enqueue = useCallback((audioData: ArrayBuffer, meta?: Record<string, unknown>) => {
     const codec = (meta?.codec as string | undefined)?.toLowerCase();
     const isPcm = codec === 'pcm16le' || codec === 'linear16' || codec === 'pcm16';
     const sampleRate = Number(meta?.sampleRate) || 24000;
+
+    if (isMobile) {
+      ensureAudioReady();
+    }
     // Mobile: agrupa micro-chunks PCM para reduzir cortes por underrun.
     if (isMobile && isPcm) {
       const bytes = new Uint8Array(audioData);
@@ -290,7 +325,7 @@ export function useAudioPlayer() {
     if (isPcm || !playingRef.current) {
       playNext();
     }
-  }, [concatUint8, isMobile, playNext]);
+  }, [concatUint8, ensureAudioReady, isMobile, playNext]);
 
   const stop = useCallback(() => {
     queueRef.current = [];
