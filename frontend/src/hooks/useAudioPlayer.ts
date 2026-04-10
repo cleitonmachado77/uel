@@ -21,9 +21,13 @@ export function useAudioPlayer() {
   const pcmBatchRef = useRef<Uint8Array[]>([]);
   const pcmBatchBytesRef = useRef(0);
   const pcmBatchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const mobilePrimedRef = useRef(false);
 
   const isMobile = typeof navigator !== 'undefined'
     && /android|iphone|ipad|ipod|mobile/i.test(navigator.userAgent);
+  const MOBILE_PCM_BATCH_BYTES = 14400; // ~300ms @ 24kHz mono 16-bit
+  const MOBILE_PCM_FLUSH_MS = 180;
+  const MOBILE_MIN_QUEUE_TO_START = 2;
 
   const getAudio = useCallback((): HTMLAudioElement => {
     if (!audioRef.current) {
@@ -255,11 +259,19 @@ export function useAudioPlayer() {
           data: merged,
           meta: { ...(meta || {}), codec: 'pcm16le', sampleRate },
         });
-        if (!playingRef.current) playNext();
+        if (playingRef.current) {
+          return;
+        }
+        if (!mobilePrimedRef.current) {
+          if (queueRef.current.length < MOBILE_MIN_QUEUE_TO_START) {
+            return;
+          }
+          mobilePrimedRef.current = true;
+        }
+        playNext();
       };
 
-      // ~200ms de áudio PCM mono 24kHz 16-bit => ~9600 bytes
-      if (pcmBatchBytesRef.current >= 9600) {
+      if (pcmBatchBytesRef.current >= MOBILE_PCM_BATCH_BYTES) {
         if (pcmBatchTimerRef.current) {
           clearTimeout(pcmBatchTimerRef.current);
           pcmBatchTimerRef.current = null;
@@ -269,7 +281,7 @@ export function useAudioPlayer() {
         pcmBatchTimerRef.current = setTimeout(() => {
           pcmBatchTimerRef.current = null;
           flushBatch();
-        }, 120);
+        }, MOBILE_PCM_FLUSH_MS);
       }
       return;
     }
@@ -285,6 +297,7 @@ export function useAudioPlayer() {
     queueRef.current = [];
     pcmBatchRef.current = [];
     pcmBatchBytesRef.current = 0;
+    mobilePrimedRef.current = false;
     if (pcmBatchTimerRef.current) {
       clearTimeout(pcmBatchTimerRef.current);
       pcmBatchTimerRef.current = null;
