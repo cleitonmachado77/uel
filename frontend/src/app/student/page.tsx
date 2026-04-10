@@ -106,7 +106,10 @@ export default function StudentPage() {
     // Seleciona imediatamente no primeiro toque/click.
     setConnected(true);
     setCurrentSession(session);
-    initPlayer().catch(() => {});
+    try {
+      // Em mobile, o unlock precisa completar dentro do gesto do usuário.
+      await initPlayer();
+    } catch (_) {}
 
     const connectWs = async () => {
       const ws = new WSClient({
