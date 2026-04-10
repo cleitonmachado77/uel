@@ -25,9 +25,9 @@ export function useAudioPlayer() {
 
   const isMobile = typeof navigator !== 'undefined'
     && /android|iphone|ipad|ipod|mobile/i.test(navigator.userAgent);
-  const MOBILE_PCM_BATCH_BYTES = 14400; // ~300ms @ 24kHz mono 16-bit
-  const MOBILE_PCM_FLUSH_MS = 180;
-  const MOBILE_MIN_QUEUE_TO_START = 2;
+  const MOBILE_PCM_BATCH_BYTES = 24000; // ~500ms @ 24kHz mono 16-bit
+  const MOBILE_PCM_FLUSH_MS = 260;
+  const MOBILE_MIN_QUEUE_TO_START = 3;
 
   const getAudio = useCallback((): HTMLAudioElement => {
     if (!audioRef.current) {
