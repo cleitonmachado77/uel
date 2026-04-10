@@ -25,9 +25,9 @@ export function useAudioPlayer() {
 
   const isMobile = typeof navigator !== 'undefined'
     && /android|iphone|ipad|ipod|mobile/i.test(navigator.userAgent);
-  const MOBILE_PCM_BATCH_BYTES = 24000; // ~500ms @ 24kHz mono 16-bit
-  const MOBILE_PCM_FLUSH_MS = 260;
-  const MOBILE_MIN_QUEUE_TO_START = 3;
+  const MOBILE_PCM_BATCH_BYTES = 7200; // ~150ms @ 24kHz mono 16-bit
+  const MOBILE_PCM_FLUSH_MS = 90;
+  const MOBILE_MIN_QUEUE_TO_START = 1;
 
   const getAudio = useCallback((): HTMLAudioElement => {
     if (!audioRef.current) {
@@ -185,7 +185,7 @@ export function useAudioPlayer() {
     const sampleRate = Number(item.meta?.sampleRate) || 24000;
     const isPcm = codec === 'pcm16le' || codec === 'linear16' || codec === 'pcm16';
     if (isPcm) {
-      const played = !isMobile && playPcmChunk(item.data, sampleRate);
+      const played = playPcmChunk(item.data, sampleRate);
       if (played) {
         if (queueRef.current.length > 0) playNext();
         return;
@@ -243,9 +243,11 @@ export function useAudioPlayer() {
     const codec = (meta?.codec as string | undefined)?.toLowerCase();
     const isPcm = codec === 'pcm16le' || codec === 'linear16' || codec === 'pcm16';
     const sampleRate = Number(meta?.sampleRate) || 24000;
+    const ctxState = ctxRef.current?.state;
+    const canStreamPcmDirect = !isMobile || ctxState === 'running';
 
     // Mobile: agrupa micro-chunks PCM para evitar reprodução "muda" em blocos curtos.
-    if (isMobile && isPcm) {
+    if (isMobile && isPcm && !canStreamPcmDirect) {
       const bytes = new Uint8Array(audioData);
       pcmBatchRef.current.push(bytes);
       pcmBatchBytesRef.current += bytes.byteLength;
