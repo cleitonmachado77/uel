@@ -42,10 +42,14 @@ export default function StudentPage() {
   const wsRef = useRef<WSClient | null>(null);
   const profStreamRef = useRef<MediaStream | null>(null);
 
+  const leavingRef = useRef(false);
+  const activeSessionRef = useRef<Session | null>(null);
+  const wsReconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const { isPlaying, init: initPlayer, attachStream, stop: stopPlayer, setAudioElement } = useAudioPlayer();
   const { init: initProfStream, feedPcm, stop: stopProfStream } = useProfessorAudioStream();
 
-  const { init: initWebRTC, stop: stopWebRTC, updateTargetLanguage, isConnecting } = useInworldWebRTC({
+  const { init: initWebRTC, stop: stopWebRTC, isConnecting } = useInworldWebRTC({
     onRemoteStream: (stream) => {
       console.log('[Student] WebRTC remote stream recebido');
       attachStream(stream);
@@ -112,30 +116,92 @@ export default function StudentPage() {
     };
   }, []);
 
+  const clearWsReconnectTimer = useCallback(() => {
+    if (wsReconnectTimerRef.current) {
+      clearTimeout(wsReconnectTimerRef.current);
+      wsReconnectTimerRef.current = null;
+    }
+  }, []);
+
   const leaveSession = useCallback(() => {
+    leavingRef.current = true;
     joiningRef.current = false;
+    clearWsReconnectTimer();
     stopWebRTC();
     stopPlayer();
     stopProfStream();
     profStreamRef.current = null;
+    activeSessionRef.current = null;
     wsRef.current?.disconnect();
     wsRef.current = null;
     setConnected(false);
     setCurrentSession(null);
     setConnectError(null);
     setPipelineReady(false);
-  }, [stopWebRTC, stopPlayer, stopProfStream]);
+    leavingRef.current = false;
+  }, [stopWebRTC, stopPlayer, stopProfStream, clearWsReconnectTimer]);
+
+  /** Reconnect WS after unexpected disconnect (keeps session alive during pauses) */
+  const reconnectWs = useCallback((session: Session) => {
+    if (leavingRef.current || !activeSessionRef.current) return;
+    clearWsReconnectTimer();
+
+    console.log('[Student] Reconectando WebSocket...');
+    const ws = new WSClient({
+      onMessage: (msg) => {
+        if (msg.type === 'session_ended') {
+          leaveSession();
+        }
+      },
+      onAudio: (audioData) => {
+        feedPcm(audioData);
+      },
+      onClose: () => {
+        console.log('[Student] WebSocket desconectado');
+        wsRef.current = null;
+        if (!leavingRef.current && activeSessionRef.current) {
+          wsReconnectTimerRef.current = setTimeout(() => {
+            wsReconnectTimerRef.current = null;
+            reconnectWs(activeSessionRef.current!);
+          }, 2000);
+        }
+      },
+      onError: () => {},
+    });
+
+    ws.connect().then(() => {
+      if (leavingRef.current || !activeSessionRef.current) {
+        ws.disconnect();
+        return;
+      }
+      console.log('[Student] WebSocket reconectado');
+      ws.send({
+        type: 'student_join',
+        sessionId: session.id,
+        language: targetLangRef.current,
+      });
+      wsRef.current = ws;
+    }).catch(() => {
+      if (!leavingRef.current && activeSessionRef.current) {
+        wsReconnectTimerRef.current = setTimeout(() => {
+          wsReconnectTimerRef.current = null;
+          reconnectWs(session);
+        }, 3000);
+      }
+    });
+  }, [feedPcm, leaveSession, clearWsReconnectTimer]);
 
   const joinSession = async (session: Session) => {
     if (joiningRef.current || connected) return;
     joiningRef.current = true;
+    leavingRef.current = false;
     console.log('[Student] joinSession iniciado para sessão:', session.id);
 
     try {
       setConnectError(null);
       setCurrentSession(session);
+      activeSessionRef.current = session;
 
-      // 1. FIRST: Connect WebSocket for presence + counter + audio chunks
       console.log('[Student] Conectando WebSocket...');
       const ws = new WSClient({
         onMessage: (msg) => {
@@ -148,9 +214,13 @@ export default function StudentPage() {
         },
         onClose: () => {
           console.log('[Student] WebSocket desconectado');
-          if (wsRef.current) {
-            wsRef.current = null;
-            leaveSession();
+          wsRef.current = null;
+          // Auto-reconnect if not intentionally leaving
+          if (!leavingRef.current && activeSessionRef.current) {
+            wsReconnectTimerRef.current = setTimeout(() => {
+              wsReconnectTimerRef.current = null;
+              reconnectWs(activeSessionRef.current!);
+            }, 2000);
           }
         },
         onError: () => {
@@ -167,17 +237,16 @@ export default function StudentPage() {
       });
       wsRef.current = ws;
 
-      // 2. Mark connected immediately (player opens, counter updates)
       setConnected(true);
       console.log('[Student] Conectado! Iniciando pipeline de áudio...');
 
-      // 3. Initialize audio pipeline in background (non-blocking)
       startAudioPipeline(targetLangRef.current);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Falha ao conectar';
       console.error('[Student] joinSession erro:', message);
       setConnectError(message);
       setCurrentSession(null);
+      activeSessionRef.current = null;
       setConnected(false);
       wsRef.current?.disconnect();
       wsRef.current = null;
@@ -207,20 +276,56 @@ export default function StudentPage() {
     }
   };
 
-  const changeLanguage = (lang: string) => {
+  const changingLangRef = useRef(false);
+
+  const changeLanguage = async (lang: string) => {
+    if (lang === targetLangRef.current || changingLangRef.current) return;
+    changingLangRef.current = true;
+
     setTargetLang(lang);
     targetLangRef.current = lang;
-    updateTargetLanguage(lang);
     wsRef.current?.send({ type: 'student_set_language', language: lang });
+
+    if (!connected) {
+      changingLangRef.current = false;
+      return;
+    }
+
+    // Restart WebRTC pipeline with new language (session.update is unreliable)
+    console.log(`[Student] Trocando idioma para ${lang}, reiniciando WebRTC...`);
+    setPipelineReady(false);
+
+    try {
+      stopWebRTC();
+
+      // Reuse existing profStream if available, otherwise create new one
+      let profStream = profStreamRef.current;
+      if (!profStream) {
+        profStream = initProfStream();
+        profStreamRef.current = profStream;
+      }
+
+      await initWebRTC(lang, profStream);
+      console.log('[Student] WebRTC reiniciado com novo idioma');
+      setPipelineReady(true);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Erro ao trocar idioma';
+      console.warn('[Student] Falha ao trocar idioma:', msg);
+    } finally {
+      changingLangRef.current = false;
+    }
   };
 
   useEffect(() => {
     return () => {
+      leavingRef.current = true;
+      clearWsReconnectTimer();
       wsRef.current?.disconnect();
       wsRef.current = null;
+      activeSessionRef.current = null;
       stopProfStream();
     };
-  }, []);
+  }, [clearWsReconnectTimer, stopProfStream]);
 
   return (
     <main className="relative min-h-screen flex flex-col px-6 py-8 pb-32">

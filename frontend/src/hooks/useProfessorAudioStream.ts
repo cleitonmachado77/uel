@@ -29,7 +29,7 @@ export function useProfessorAudioStream() {
     destinationRef.current = destination;
 
     // ScriptProcessor acts as a pull-based audio source: it reads from the queue
-    const processor = ctx.createScriptProcessor(4096, 1, 1);
+    const processor = ctx.createScriptProcessor(2048, 1, 1);
     processorRef.current = processor;
 
     processor.onaudioprocess = (event) => {
@@ -75,8 +75,8 @@ export function useProfessorAudioStream() {
     }
     bufferQueueRef.current.push(float32);
 
-    // Prevent unbounded memory growth (keep max ~5 seconds of audio)
-    const maxChunks = Math.ceil((SAMPLE_RATE * 5) / 4096);
+    // Keep max ~1 second to minimise replay delay
+    const maxChunks = Math.ceil((SAMPLE_RATE * 1) / 2048);
     while (bufferQueueRef.current.length > maxChunks) {
       bufferQueueRef.current.shift();
       readOffsetRef.current = 0;

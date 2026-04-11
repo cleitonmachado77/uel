@@ -7,7 +7,21 @@ const lingeringSessions = new Map();
 
 export function setupWebSocket(server) {
   const wss = new WebSocketServer({ server, path: "/ws" });
+
+  // Server-initiated ping every 25s to keep connections alive through proxies/LBs
+  const aliveInterval = setInterval(() => {
+    for (const client of wss.clients) {
+      if (client._isAlive === false) { client.terminate(); continue; }
+      client._isAlive = false;
+      client.ping();
+    }
+  }, 25000);
+  wss.on("close", () => clearInterval(aliveInterval));
+
   wss.on("connection", (ws, req) => {
+    ws._isAlive = true;
+    ws.on("pong", () => { ws._isAlive = true; });
+
     const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
     console.log(`[WS] Nova conexão de ${clientIp}`);
     let role = null, sessionId = null, userId = null;

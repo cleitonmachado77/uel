@@ -17,7 +17,7 @@ function startPcmRelay(
   const ACtx = window.AudioContext || (window as any).webkitAudioContext;
   const audioCtx = new ACtx({ sampleRate: 24000 });
   const source = audioCtx.createMediaStreamSource(stream);
-  const processor = audioCtx.createScriptProcessor(4096, 1, 1);
+  const processor = audioCtx.createScriptProcessor(2048, 1, 1);
 
   processor.onaudioprocess = (event) => {
     const input = event.inputBuffer.getChannelData(0);

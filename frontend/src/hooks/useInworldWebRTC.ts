@@ -23,7 +23,7 @@ function buildTranslatorInstructions(targetLang: string) {
     ? 'Responda SOMENTE em francês (França). Nunca use inglês.'
     : `Responda SOMENTE em ${humanTarget}. Nunca use inglês, exceto se o idioma alvo for inglês.`;
 
-  return `Você é um tradutor simultâneo profissional. O usuário fala em português (Brasil). Traduza imediatamente tudo que ele disser para ${humanTarget}, falando de forma natural, fluida e mantendo o tom emocional original. Seja conciso e natural. Nunca adicione explicações. Responda sempre em voz falada. Nunca diga a palavra "Voice" ou "voz". ${strictTargetRule}`;
+  return `Você é um tradutor simultâneo profissional. O usuário fala em português (Brasil). Traduza imediatamente tudo que ele disser para ${humanTarget}, falando de forma natural, fluida e mantendo o tom emocional original. Seja conciso e natural. Nunca adicione explicações. Nunca repita palavras ou frases já traduzidas. Se houver silêncio, aguarde sem falar. Responda sempre em voz falada. Nunca diga a palavra "Voice" ou "voz". ${strictTargetRule}`;
 }
 
 function buildSessionUpdate(targetLang: string) {
@@ -39,8 +39,10 @@ function buildSessionUpdate(targetLang: string) {
             model: 'assemblyai/universal-streaming-multilingual',
           },
           turn_detection: {
-            type: 'semantic_vad',
-            eagerness: 'medium',
+            type: 'server_vad',
+            threshold: 0.5,
+            prefix_padding_ms: 200,
+            silence_duration_ms: 500,
             create_response: true,
             interrupt_response: true,
           },
