@@ -149,7 +149,8 @@ export default function StudentPage() {
     console.log('[Student] Reconectando WebSocket...');
     const ws = new WSClient({
       onMessage: (msg) => {
-        if (msg.type === 'session_ended') {
+        if (msg.type === 'session_ended' || msg.type === 'error') {
+          console.log('[Student] Sessão encerrada durante reconexão');
           leaveSession();
         }
       },
@@ -206,6 +207,7 @@ export default function StudentPage() {
       const ws = new WSClient({
         onMessage: (msg) => {
           if (msg.type === 'session_ended') {
+            console.log('[Student] Sessão encerrada pelo professor');
             leaveSession();
           }
         },

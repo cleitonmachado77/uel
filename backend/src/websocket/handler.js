@@ -3,7 +3,7 @@ import { createSession, endSession, joinSessionDB, leaveSessionDB, syncListenerC
 
 const activeSessions = new Map();
 global.activeSessions = activeSessions;
-const lingeringSessions = new Map();
+
 
 export function setupWebSocket(server) {
   const wss = new WebSocketServer({ server, path: "/ws" });
@@ -96,20 +96,17 @@ function broadcastAudio(sessionId, base64Data) {
 async function closeSession(sessionId) {
   const session = activeSessions.get(sessionId);
   if (!session) return;
-  lingeringSessions.set(sessionId, { listeners: new Map(session.listeners), language: session.language });
+
+  // Notify students immediately so the player closes right away
+  const endPayload = JSON.stringify({ type: "session_ended" });
+  for (const [lws] of session.listeners) {
+    try { if (lws.readyState === 1) lws.send(endPayload); } catch (_) {}
+  }
+
   activeSessions.delete(sessionId);
   syncListenerCount(sessionId, 0).catch(() => {});
   await endSession(sessionId);
   console.log(`[Session ${sessionId}] encerrada`);
-  setTimeout(() => {
-    if (lingeringSessions.has(sessionId)) { notifySessionEnded(sessionId); lingeringSessions.delete(sessionId); }
-  }, 4000);
-}
-
-function notifySessionEnded(sessionId) {
-  const l = lingeringSessions.get(sessionId);
-  if (!l) return;
-  for (const [lws] of l.listeners) { try { lws.send(JSON.stringify({ type: "session_ended" })); } catch (_) {} }
 }
 
 async function handleControlMessage(ws, msg, userId, setRole) {
