@@ -78,20 +78,21 @@ async function waitForIceGathering(pc: RTCPeerConnection, timeoutMs = 3500) {
   });
 }
 
-type UseInworldWebRTCOptions = {
+export type UseInworldWebRTCOptions = {
   onRemoteStream?: (stream: MediaStream | null) => void;
+  onLocalStream?: (stream: MediaStream) => void;
   onDebug?: (message: string) => void;
   onError?: (error: Error) => void;
   maxReconnectAttempts?: number;
 };
 
 export function useInworldWebRTC(options: UseInworldWebRTCOptions = {}) {
-  const {
-    onRemoteStream,
-    onDebug,
-    onError,
-    maxReconnectAttempts = 4,
-  } = options;
+  // Store callbacks in a ref so internal functions always see the latest
+  // version without needing them in useCallback dependency arrays.
+  const optRef = useRef(options);
+  optRef.current = options;
+
+  const maxReconnect = options.maxReconnectAttempts ?? 4;
 
   const [isConnected, setIsConnected] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
@@ -99,16 +100,19 @@ export function useInworldWebRTC(options: UseInworldWebRTCOptions = {}) {
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const dcRef = useRef<RTCDataChannel | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
+  const ownsLocalStreamRef = useRef(false);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectAttemptsRef = useRef(0);
   const isConnectingRef = useRef(false);
   const activeInitIdRef = useRef(0);
   const stoppingRef = useRef(false);
   const lastTargetLangRef = useRef(DEFAULT_TARGET_LANG);
+  const lastAudioSourceRef = useRef<MediaStream | undefined>(undefined);
+  const initFnRef = useRef<(lang: string, src?: MediaStream) => Promise<void>>();
 
   const debug = useCallback(
-    (message: string) => onDebug?.(`[InworldWebRTC] ${message}`),
-    [onDebug],
+    (message: string) => optRef.current.onDebug?.(`[InworldWebRTC] ${message}`),
+    [],
   );
 
   const clearReconnectTimer = useCallback(() => {
@@ -128,21 +132,21 @@ export function useInworldWebRTC(options: UseInworldWebRTCOptions = {}) {
       pcRef.current = null;
     }
 
-    if (localStreamRef.current) {
+    if (localStreamRef.current && ownsLocalStreamRef.current) {
       for (const track of localStreamRef.current.getTracks()) {
         track.stop();
       }
-      localStreamRef.current = null;
     }
+    localStreamRef.current = null;
+    ownsLocalStreamRef.current = false;
 
-    onRemoteStream?.(null);
-  }, [onRemoteStream]);
+    optRef.current.onRemoteStream?.(null);
+  }, []);
 
   const scheduleReconnect = useCallback((targetLang: string) => {
     if (stoppingRef.current || isConnectingRef.current || reconnectTimerRef.current) return;
-    if (reconnectAttemptsRef.current >= maxReconnectAttempts) {
-      const err = new Error('Limite de reconexão do WebRTC atingido');
-      onError?.(err);
+    if (reconnectAttemptsRef.current >= maxReconnect) {
+      optRef.current.onError?.(new Error('Limite de reconexão do WebRTC atingido'));
       return;
     }
 
@@ -152,9 +156,9 @@ export function useInworldWebRTC(options: UseInworldWebRTCOptions = {}) {
 
     reconnectTimerRef.current = setTimeout(() => {
       reconnectTimerRef.current = null;
-      init(targetLang).catch(() => {});
+      initFnRef.current?.(targetLang, lastAudioSourceRef.current).catch(() => {});
     }, delayMs);
-  }, [debug, maxReconnectAttempts, onError]);
+  }, [debug, maxReconnect]);
 
   const sendEvent = useCallback((event: Record<string, unknown>) => {
     const dc = dcRef.current;
@@ -165,7 +169,7 @@ export function useInworldWebRTC(options: UseInworldWebRTCOptions = {}) {
     return true;
   }, []);
 
-  const init = useCallback(async (targetLang = DEFAULT_TARGET_LANG) => {
+  const init = useCallback(async (targetLang = DEFAULT_TARGET_LANG, audioSource?: MediaStream) => {
     if (isConnectingRef.current) return;
 
     const initId = activeInitIdRef.current + 1;
@@ -177,10 +181,12 @@ export function useInworldWebRTC(options: UseInworldWebRTCOptions = {}) {
     setIsConnecting(true);
     setIsConnected(false);
     lastTargetLangRef.current = targetLang;
+    lastAudioSourceRef.current = audioSource;
 
     try {
       cleanupPeer();
 
+      debug('buscando ICE servers...');
       const iceRes = await fetch(`${API_URL}/api/realtime/ice-servers`);
       if (!iceRes.ok) {
         throw new Error(`Falha ao obter ICE servers (${iceRes.status})`);
@@ -188,14 +194,26 @@ export function useInworldWebRTC(options: UseInworldWebRTCOptions = {}) {
       const icePayload = await iceRes.json();
       const iceServers = icePayload?.ice_servers || [];
 
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-          channelCount: 1,
-        },
-      });
+      let stream: MediaStream;
+      if (audioSource) {
+        stream = audioSource;
+        ownsLocalStreamRef.current = false;
+        debug('usando audioSource externo');
+      } else {
+        debug('solicitando acesso ao microfone...');
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+            channelCount: 1,
+          },
+        });
+        ownsLocalStreamRef.current = true;
+        optRef.current.onLocalStream?.(stream);
+      }
+
+      if (activeInitIdRef.current !== initId || stoppingRef.current) return;
 
       const pc = new RTCPeerConnection({ iceServers });
       pcRef.current = pc;
@@ -224,7 +242,7 @@ export function useInworldWebRTC(options: UseInworldWebRTCOptions = {}) {
         try {
           const msg = JSON.parse(evt.data);
           if (msg.type === 'error') {
-            onError?.(new Error(msg.error?.message || msg.message || 'Erro Inworld'));
+            optRef.current.onError?.(new Error(msg.error?.message || msg.message || 'Erro Inworld'));
           }
         } catch (_) {}
       };
@@ -235,7 +253,7 @@ export function useInworldWebRTC(options: UseInworldWebRTCOptions = {}) {
 
       pc.ontrack = (event) => {
         const remoteStream = event.streams?.[0] || new MediaStream([event.track]);
-        onRemoteStream?.(remoteStream);
+        optRef.current.onRemoteStream?.(remoteStream);
       };
 
       pc.onconnectionstatechange = () => {
@@ -247,9 +265,7 @@ export function useInworldWebRTC(options: UseInworldWebRTCOptions = {}) {
           setIsConnected(true);
           return;
         }
-        if (!pc.currentRemoteDescription) {
-          return;
-        }
+        if (!pc.currentRemoteDescription) return;
         if (st === 'failed' || st === 'disconnected') {
           setIsConnected(false);
           if (!stoppingRef.current) scheduleReconnect(lastTargetLangRef.current);
@@ -260,6 +276,7 @@ export function useInworldWebRTC(options: UseInworldWebRTCOptions = {}) {
       await pc.setLocalDescription(offer);
       await waitForIceGathering(pc);
 
+      debug('enviando SDP offer para o backend...');
       const callRes = await fetch(`${API_URL}/api/realtime/calls`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -286,10 +303,14 @@ export function useInworldWebRTC(options: UseInworldWebRTCOptions = {}) {
         type: 'answer',
         sdp: callPayload.sdp,
       });
+
+      debug('WebRTC conectado com sucesso');
     } catch (err) {
       const parsedErr = err instanceof Error ? err : new Error('Falha ao iniciar WebRTC');
-      onError?.(parsedErr);
-      scheduleReconnect(targetLang);
+      optRef.current.onError?.(parsedErr);
+      if (!stoppingRef.current) {
+        scheduleReconnect(targetLang);
+      }
       throw parsedErr;
     } finally {
       if (activeInitIdRef.current === initId) {
@@ -297,16 +318,16 @@ export function useInworldWebRTC(options: UseInworldWebRTCOptions = {}) {
       }
       setIsConnecting(false);
     }
-  }, [cleanupPeer, clearReconnectTimer, onError, onRemoteStream, scheduleReconnect, sendEvent, debug]);
+  }, [cleanupPeer, clearReconnectTimer, scheduleReconnect, sendEvent, debug]);
+
+  // Keep ref in sync so scheduleReconnect always calls the latest init
+  initFnRef.current = init;
 
   const updateTargetLanguage = useCallback((targetLang: string) => {
     if (!targetLang) return;
     lastTargetLangRef.current = targetLang;
-    const sent = sendEvent(buildSessionUpdate(targetLang));
-    if (!sent && isConnected && !isConnecting) {
-      scheduleReconnect(targetLang);
-    }
-  }, [isConnected, isConnecting, scheduleReconnect, sendEvent]);
+    sendEvent(buildSessionUpdate(targetLang));
+  }, [sendEvent]);
 
   const stop = useCallback(() => {
     stoppingRef.current = true;

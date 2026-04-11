@@ -1,6 +1,8 @@
 'use client';
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { usePcmPlayer } from '@/hooks/usePcmPlayer';
+import { useInworldWebRTC } from '@/hooks/useInworldWebRTC';
+import { useAudioPlayer } from '@/hooks/useAudioPlayer';
+import { useProfessorAudioStream } from '@/hooks/useProfessorAudioStream';
 import { useLocale } from '@/contexts/LocaleContext';
 import { supabase } from '@/lib/supabase';
 import { WSClient } from '@/lib/websocket';
@@ -35,9 +37,24 @@ export default function StudentPage() {
   const [connectError, setConnectError] = useState<string | null>(null);
   const targetLangRef = useRef(targetLang);
   const [loading, setLoading] = useState(true);
+  const [pipelineReady, setPipelineReady] = useState(false);
   const joiningRef = useRef(false);
   const wsRef = useRef<WSClient | null>(null);
-  const { isPlaying, init: initPlayer, feedPcm, stop: stopPlayer } = usePcmPlayer();
+  const profStreamRef = useRef<MediaStream | null>(null);
+
+  const { isPlaying, init: initPlayer, attachStream, stop: stopPlayer, setAudioElement } = useAudioPlayer();
+  const { init: initProfStream, feedPcm, stop: stopProfStream } = useProfessorAudioStream();
+
+  const { init: initWebRTC, stop: stopWebRTC, updateTargetLanguage, isConnecting } = useInworldWebRTC({
+    onRemoteStream: (stream) => {
+      console.log('[Student] WebRTC remote stream recebido');
+      attachStream(stream);
+    },
+    onDebug: (msg) => console.log(msg),
+    onError: (err) => {
+      console.error('[Student WebRTC]', err.message);
+    },
+  });
 
   const fetchSessions = async () => {
     try {
@@ -97,24 +114,29 @@ export default function StudentPage() {
 
   const leaveSession = useCallback(() => {
     joiningRef.current = false;
+    stopWebRTC();
     stopPlayer();
+    stopProfStream();
+    profStreamRef.current = null;
     wsRef.current?.disconnect();
     wsRef.current = null;
     setConnected(false);
     setCurrentSession(null);
     setConnectError(null);
-  }, [stopPlayer]);
+    setPipelineReady(false);
+  }, [stopWebRTC, stopPlayer, stopProfStream]);
 
   const joinSession = async (session: Session) => {
     if (joiningRef.current || connected) return;
     joiningRef.current = true;
+    console.log('[Student] joinSession iniciado para sessão:', session.id);
 
     try {
       setConnectError(null);
       setCurrentSession(session);
 
-      await initPlayer();
-
+      // 1. FIRST: Connect WebSocket for presence + counter + audio chunks
+      console.log('[Student] Conectando WebSocket...');
       const ws = new WSClient({
         onMessage: (msg) => {
           if (msg.type === 'session_ended') {
@@ -125,8 +147,11 @@ export default function StudentPage() {
           feedPcm(audioData);
         },
         onClose: () => {
-          wsRef.current = null;
-          leaveSession();
+          console.log('[Student] WebSocket desconectado');
+          if (wsRef.current) {
+            wsRef.current = null;
+            leaveSession();
+          }
         },
         onError: () => {
           setConnectError('Erro na conexão WebSocket');
@@ -134,17 +159,26 @@ export default function StudentPage() {
       });
 
       await ws.connect();
+      console.log('[Student] WebSocket conectado, enviando student_join...');
       ws.send({
         type: 'student_join',
         sessionId: session.id,
         language: targetLangRef.current,
       });
       wsRef.current = ws;
+
+      // 2. Mark connected immediately (player opens, counter updates)
       setConnected(true);
+      console.log('[Student] Conectado! Iniciando pipeline de áudio...');
+
+      // 3. Initialize audio pipeline in background (non-blocking)
+      startAudioPipeline(targetLangRef.current);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Falha ao conectar';
+      console.error('[Student] joinSession erro:', message);
       setConnectError(message);
       setCurrentSession(null);
+      setConnected(false);
       wsRef.current?.disconnect();
       wsRef.current = null;
     } finally {
@@ -152,29 +186,39 @@ export default function StudentPage() {
     }
   };
 
-  // Resume AudioContext ao interagir (iOS/iPadOS suspende em background)
-  useEffect(() => {
-    if (!connected) return;
-    const handleInteraction = () => { initPlayer().catch(() => {}); };
-    document.addEventListener('touchstart', handleInteraction, { passive: true });
-    document.addEventListener('click', handleInteraction);
-    return () => {
-      document.removeEventListener('touchstart', handleInteraction);
-      document.removeEventListener('click', handleInteraction);
-    };
-  }, [connected, initPlayer]);
+  /** Runs in background after WS connection is established */
+  const startAudioPipeline = async (lang: string) => {
+    setPipelineReady(false);
+    try {
+      console.log('[Student] Desbloqueando áudio...');
+      await initPlayer();
+
+      console.log('[Student] Criando professor audio stream...');
+      const profMediaStream = initProfStream();
+      profStreamRef.current = profMediaStream;
+
+      console.log('[Student] Iniciando WebRTC com Inworld...');
+      await initWebRTC(lang, profMediaStream);
+      console.log('[Student] WebRTC iniciado com sucesso');
+      setPipelineReady(true);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Erro no pipeline de áudio';
+      console.warn('[Student] Pipeline de áudio falhou (reconexão automática):', msg);
+    }
+  };
 
   const changeLanguage = (lang: string) => {
     setTargetLang(lang);
     targetLangRef.current = lang;
+    updateTargetLanguage(lang);
     wsRef.current?.send({ type: 'student_set_language', language: lang });
   };
 
-  // Cleanup no unmount
   useEffect(() => {
     return () => {
       wsRef.current?.disconnect();
       wsRef.current = null;
+      stopProfStream();
     };
   }, []);
 
@@ -183,7 +227,6 @@ export default function StudentPage() {
       <div className="absolute inset-0 -z-10 bg-cover bg-center bg-no-repeat" style={{ backgroundImage: 'url(/bg-app.jpg)' }}>
         <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" />
       </div>
-      {/* Header */}
       <div className="w-full max-w-md mx-auto mb-6">
         <a href="/" className="inline-flex items-center gap-1 px-4 py-2 rounded-full border border-white/20 bg-white/5 text-gray-300 text-sm hover:bg-white/10 hover:text-white transition-colors">
           {t('back')}
@@ -193,6 +236,7 @@ export default function StudentPage() {
       <div className="w-full max-w-md mx-auto bg-black/40 backdrop-blur-md rounded-3xl p-6 border border-white/10">
         <h1 className="text-2xl font-bold text-primary mb-1">{t('student.title')}</h1>
         <p className="text-gray-400 text-sm mb-6">{t('student.subtitle')}</p>
+        <audio ref={setAudioElement} autoPlay playsInline className="hidden" />
 
         {connectError && (
           <div className="mb-4 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-300">
@@ -200,7 +244,6 @@ export default function StudentPage() {
           </div>
         )}
 
-        {/* Seletor de idioma */}
         <div className="mb-6">
           <label className="text-gray-400 text-xs uppercase tracking-wider mb-2 block">
             {t('student.translate_to')}
@@ -218,7 +261,6 @@ export default function StudentPage() {
           </div>
         </div>
 
-        {/* Lista de sessões */}
         <div className="space-y-3">
           {loading && (
             <div className="flex justify-center py-12">
@@ -234,7 +276,7 @@ export default function StudentPage() {
           )}
 
           {sessions.map((session) => (
-            <button key={session.id} onClick={() => joinSession(session)} disabled={connected}
+            <button key={session.id} onClick={() => joinSession(session)} disabled={connected || isConnecting}
               className="w-full bg-white/5 hover:bg-white/10 border border-white/10 rounded-2xl p-4 text-left transition-colors disabled:opacity-50">
               <div className="flex items-center gap-4">
                 {session.avatarUrl ? (
@@ -261,7 +303,6 @@ export default function StudentPage() {
         </div>
       </div>
 
-      {/* Player fixo no rodapé (estilo Spotify) */}
       {connected && currentSession && (
         <div className="fixed bottom-0 left-0 right-0 bg-black/60 backdrop-blur-md border-t border-white/10 px-6 py-4">
           <div className="max-w-md mx-auto flex items-center gap-4">
@@ -272,15 +313,22 @@ export default function StudentPage() {
               <p className="text-gray-400 text-xs truncate">{currentSession.subject}</p>
             </div>
 
-            <div className="flex items-end gap-0.5 h-4">
+            <div className="flex items-center gap-1.5 h-5 shrink-0">
               {isPlaying ? (
-                [...Array(4)].map((_, i) => (
-                  <div
-                    key={i}
-                    className="w-1 bg-primary rounded-full audio-bar"
-                    style={{ animationDelay: `${i * 0.12}s` }}
-                  />
-                ))
+                <div className="flex items-end gap-0.5 h-4">
+                  {[...Array(4)].map((_, i) => (
+                    <div
+                      key={i}
+                      className="w-1 bg-primary rounded-full audio-bar"
+                      style={{ animationDelay: `${i * 0.12}s` }}
+                    />
+                  ))}
+                </div>
+              ) : !pipelineReady ? (
+                <div className="flex items-center gap-1.5">
+                  <div className="w-3 h-3 border-[1.5px] border-primary/60 border-t-primary rounded-full animate-spin" />
+                  <span className="text-primary/60 text-[10px] tracking-wide">{t('student.initializing')}</span>
+                </div>
               ) : (
                 <span className="text-gray-500 text-xs">{t('student.waiting_audio')}</span>
               )}
@@ -288,7 +336,7 @@ export default function StudentPage() {
 
             <button
               onClick={leaveSession}
-              className="bg-red-600/20 text-red-400 hover:bg-red-600/30 px-4 py-2 rounded-full text-sm transition-colors"
+              className="bg-red-600/20 text-red-400 hover:bg-red-600/30 px-4 py-2 rounded-full text-sm transition-colors shrink-0"
             >
               {t('student.leave')}
             </button>

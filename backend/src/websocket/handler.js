@@ -1,23 +1,9 @@
 import { WebSocketServer } from "ws";
-import { createRealtimeTranslator } from "../services/realtime-translator.js";
 import { createSession, endSession, joinSessionDB, leaveSessionDB, syncListenerCount, validateToken } from "../services/supabase.js";
 
 const activeSessions = new Map();
 global.activeSessions = activeSessions;
 const lingeringSessions = new Map();
-
-function isFatalInworldError(message = "") {
-  const normalized = String(message).toLowerCase();
-  return (
-    normalized.includes("401") ||
-    normalized.includes("402") ||
-    normalized.includes("403") ||
-    normalized.includes("auth") ||
-    normalized.includes("quota") ||
-    normalized.includes("payment") ||
-    normalized.includes("billing")
-  );
-}
 
 export function setupWebSocket(server) {
   const wss = new WebSocketServer({ server, path: "/ws" });
@@ -37,12 +23,12 @@ export function setupWebSocket(server) {
           if (!userId && msg.studentId) userId = msg.studentId;
 
           if (msg.type === "audio_chunk" && role === "professor" && sessionId) {
-            handleAudioData(sessionId, Buffer.from(msg.data, "base64"));
+            broadcastAudio(sessionId, msg.data);
             return;
           }
           await handleControlMessage(ws, msg, userId, (r, s) => { role = r; sessionId = s; });
         } else if (role === "professor" && sessionId) {
-          handleAudioData(sessionId, data);
+          broadcastAudio(sessionId, Buffer.from(data).toString("base64"));
         }
       } catch (err) {
         console.error("WebSocket message error:", err.message);
@@ -71,70 +57,25 @@ export function setupWebSocket(server) {
   console.log("WebSocket server ready");
 }
 
-function openRealtimeStream(sessionId) {
+/**
+ * Broadcasts raw PCM audio (base64) from the professor to all student listeners.
+ * Each student's browser handles its own Inworld WebRTC translation.
+ */
+function broadcastAudio(sessionId, base64Data) {
   const session = activeSessions.get(sessionId);
-  if (!session || session.rtBlocked) return;
+  if (!session || !base64Data || session.listeners.size === 0) return;
 
-  if (session.rtStream) {
-    try { session.rtStream.close(); } catch (_) {}
-    session.rtStream = null;
-  }
+  const payload = JSON.stringify({
+    type: "audio_chunk",
+    data: base64Data,
+    codec: "pcm16le",
+    sampleRate: 24000,
+    channels: 1,
+  });
 
-  session.rtStream = createRealtimeTranslator(
-    {
-      initialTargetLang: session.currentTargetLang || "en",
-      onAudioDelta: (audioChunk) => onOutputAudio(sessionId, audioChunk),
-      onTranscriptDelta: (deltaText) => onOutputTranscript(sessionId, deltaText),
-      onConnected: () => console.log(`[Session ${sessionId}] Inworld Realtime conectado`),
-      onDebug: (msg) => console.log(msg),
-      onError: (err) => {
-        console.error(`[Session ${sessionId}] Inworld error:`, err.message);
-        const stream = session.rtStream;
-        session.rtStream = null;
-        if (isFatalInworldError(err.message)) {
-          try { stream?.close?.(); } catch (_) {}
-          session.rtBlocked = true;
-          console.warn(`[Session ${sessionId}] Realtime bloqueado por erro fatal: ${err.message}`);
-          return;
-        }
-        setTimeout(() => {
-          if (activeSessions.has(sessionId)) openRealtimeStream(sessionId);
-        }, 1000);
-      },
-    }
-  );
-}
-
-function onOutputTranscript(sessionId, transcriptDelta) {
-  const session = activeSessions.get(sessionId);
-  if (!session || !transcriptDelta) return;
-  if (session.professorWs?.readyState === 1) {
-    session.professorWs.send(JSON.stringify({
-      type: "translated_transcript_delta",
-      text: transcriptDelta,
-    }));
-  }
-}
-
-function onOutputAudio(sessionId, audioChunk) {
-  const session = activeSessions.get(sessionId);
-  const lingering = lingeringSessions.get(sessionId);
-  const listeners = session?.listeners || lingering?.listeners;
-  if (!listeners || listeners.size === 0) return;
-
-  const data = Buffer.from(audioChunk).toString("base64");
-  for (const [lws, info] of listeners) {
-    const lang = info.targetLang || "en";
-    if (lang === (session?.language || lingering?.language)) continue;
+  for (const [lws] of session.listeners) {
     if (lws.readyState !== 1) continue;
-    lws.send(JSON.stringify({
-      type: "audio_chunk",
-      data,
-      codec: "pcm16le",
-      sampleRate: 24000,
-      channels: 1,
-      source: "inworld-realtime",
-    }));
+    lws.send(payload);
   }
 }
 
@@ -142,7 +83,6 @@ async function closeSession(sessionId) {
   const session = activeSessions.get(sessionId);
   if (!session) return;
   lingeringSessions.set(sessionId, { listeners: new Map(session.listeners), language: session.language });
-  if (session.rtStream) { try { session.rtStream.close(); } catch (_) {} }
   activeSessions.delete(sessionId);
   syncListenerCount(sessionId, 0).catch(() => {});
   await endSession(sessionId);
@@ -156,17 +96,6 @@ function notifySessionEnded(sessionId) {
   const l = lingeringSessions.get(sessionId);
   if (!l) return;
   for (const [lws] of l.listeners) { try { lws.send(JSON.stringify({ type: "session_ended" })); } catch (_) {} }
-}
-
-function handleAudioData(sessionId, audioBuffer) {
-  const session = activeSessions.get(sessionId);
-  if (!session || audioBuffer.length < 100 || session.rtBlocked) return;
-
-  if (!session.rtStream || session.rtStream.isClosed || session.rtStream.readyState > 1) {
-    openRealtimeStream(sessionId);
-  }
-
-  session.rtStream?.appendAudioChunk(audioBuffer);
 }
 
 async function handleControlMessage(ws, msg, userId, setRole) {
@@ -184,11 +113,7 @@ async function handleControlMessage(ws, msg, userId, setRole) {
           subject: dbSession.subject,
           language: dbSession.language,
           listeners: new Map(),
-          currentTargetLang: "en",
-          rtStream: null,
-          rtBlocked: false,
         });
-        openRealtimeStream(sessionId);
         setRole("professor", sessionId);
         ws.send(JSON.stringify({ type: "session_created", sessionId }));
         console.log(`[Session ${sessionId}] criada por ${msg.professorName}`);
@@ -219,8 +144,6 @@ async function handleControlMessage(ws, msg, userId, setRole) {
         }
       }
       session.listeners.set(ws, { studentId, targetLang });
-      session.currentTargetLang = targetLang;
-      session.rtStream?.updateTargetLanguage(targetLang, { forceReconnect: true });
       setRole("student", msg.sessionId);
       ws.send(JSON.stringify({ type: "joined", professorName: session.professorName, subject: session.subject }));
       console.log(`[Session ${msg.sessionId}] Aluno conectado (total: ${session.listeners.size})`);
@@ -234,8 +157,6 @@ async function handleControlMessage(ws, msg, userId, setRole) {
         const info = session.listeners.get(ws);
         if (info) {
           info.targetLang = lang;
-          session.currentTargetLang = lang;
-          session.rtStream?.updateTargetLanguage(lang, { forceReconnect: true });
           break;
         }
       }

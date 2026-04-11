@@ -1,11 +1,57 @@
 'use client';
-import { useState, useRef, useCallback, useEffect } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { WSClient } from '@/lib/websocket';
-import { useAudioCapture } from '@/hooks/useAudioCapture';
 import { useAuth } from '@/contexts/AuthContext';
 import { useLocale } from '@/contexts/LocaleContext';
 import { supabase } from '@/lib/supabase';
-import { type Locale, LOCALES } from '@/lib/i18n';
+import { LOCALES } from '@/lib/i18n';
+
+/**
+ * Captures PCM16LE from a MediaStream and calls onChunk with base64 data.
+ * Returns a cleanup function that stops the capture.
+ */
+function startPcmRelay(
+  stream: MediaStream,
+  onChunk: (b64: string) => void,
+): () => void {
+  const ACtx = window.AudioContext || (window as any).webkitAudioContext;
+  const audioCtx = new ACtx({ sampleRate: 24000 });
+  const source = audioCtx.createMediaStreamSource(stream);
+  const processor = audioCtx.createScriptProcessor(4096, 1, 1);
+
+  processor.onaudioprocess = (event) => {
+    const input = event.inputBuffer.getChannelData(0);
+    const pcmBuffer = new ArrayBuffer(input.length * 2);
+    const view = new DataView(pcmBuffer);
+    for (let i = 0; i < input.length; i++) {
+      const sample = Math.max(-1, Math.min(1, input[i]));
+      view.setInt16(i * 2, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+    }
+    const bytes = new Uint8Array(pcmBuffer);
+    let raw = '';
+    const chunkSize = 8192;
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      raw += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+    }
+    onChunk(btoa(raw));
+  };
+
+  const mute = audioCtx.createGain();
+  mute.gain.value = 0;
+  source.connect(processor);
+  processor.connect(mute);
+  mute.connect(audioCtx.destination);
+  audioCtx.resume().catch(() => {});
+
+  return () => {
+    try {
+      processor.disconnect();
+      source.disconnect();
+      mute.disconnect();
+      audioCtx.close();
+    } catch (_) {}
+  };
+}
 
 export default function ProfessorPage() {
   const { user, session: authSession } = useAuth();
@@ -16,8 +62,10 @@ export default function ProfessorPage() {
   const [professorName, setProfessorName] = useState('');
   const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
   const wsRef = useRef<WSClient | null>(null);
+  const micStreamRef = useRef<MediaStream | null>(null);
+  const stopRelayRef = useRef<(() => void) | null>(null);
+  const startingRef = useRef(false);
 
-  // Puxa nome e foto do perfil
   useEffect(() => {
     if (!user) return;
     supabase
@@ -28,76 +76,107 @@ export default function ProfessorPage() {
       .then(({ data }) => {
         if (data) {
           setProfessorName(data.name);
-          // Adiciona cache-busting para garantir que a imagem mais recente seja exibida
           setAvatarUrl(data.avatar_url ? `${data.avatar_url}?t=${Date.now()}` : null);
         }
       });
   }, [user]);
 
-  const onAudioChunk = useCallback((blob: Blob) => {
-    blob.arrayBuffer().then((buf) => {
-      const bytes = new Uint8Array(buf);
-      // btoa em chunks para evitar stack overflow em buffers grandes
-      let b64 = '';
-      const chunkSize = 8192;
-      for (let i = 0; i < bytes.length; i += chunkSize) {
-        b64 += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
-      }
-      wsRef.current?.send({ type: 'audio_chunk', data: btoa(b64) });
-    });
-  }, []);
-
-  const { isCapturing, start: startCapture, stop: stopCapture } = useAudioCapture(onAudioChunk);
+  const cleanupAll = () => {
+    stopRelayRef.current?.();
+    stopRelayRef.current = null;
+    if (micStreamRef.current) {
+      for (const track of micStreamRef.current.getTracks()) track.stop();
+      micStreamRef.current = null;
+    }
+  };
 
   const startSession = async () => {
-    if (!subject.trim()) return;
+    if (!subject.trim() || startingRef.current) return;
+    startingRef.current = true;
     setStatus('connecting');
 
-    const ws = new WSClient({
-      onMessage: (msg) => {
-        if (msg.type === 'session_created') {
-          setSessionId(msg.sessionId as string);
-          setStatus('live');
-          startCapture();
-        }
-        if (msg.type === 'session_stopped') {
-          setStatus('idle');
-          setSessionId(null);
-        }
-        if (msg.type === 'error') {
-          console.error('WS error:', msg.message);
-          setStatus('idle');
-        }
-      },
-      onClose: () => {
-        setStatus('idle');
-        stopCapture();
-      },
-    });
+    try {
+      console.log('[Professor] Solicitando microfone...');
+      const micStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          channelCount: 1,
+        },
+      });
+      micStreamRef.current = micStream;
+      console.log('[Professor] Microfone obtido');
 
-    await ws.connect();
-    wsRef.current = ws;
+      const ws = new WSClient({
+        onMessage: (msg) => {
+          if (msg.type === 'session_created') {
+            const sid = msg.sessionId as string;
+            console.log('[Professor] Sessão criada:', sid);
+            setSessionId(sid);
+            setStatus('live');
 
-    ws.send({
-      type: 'professor_start',
-      token: authSession?.access_token,
-      professorId: user?.id,
-      professorName,
-      subject,
-      language: 'pt',
-    });
+            stopRelayRef.current?.();
+            stopRelayRef.current = startPcmRelay(micStream, (b64) => {
+              wsRef.current?.send({ type: 'audio_chunk', data: b64 });
+            });
+            console.log('[Professor] PCM relay iniciado');
+          }
+          if (msg.type === 'session_stopped') {
+            setStatus('idle');
+            setSessionId(null);
+          }
+          if (msg.type === 'error') {
+            console.error('[Professor] WS error:', msg.message);
+            setStatus('idle');
+          }
+        },
+        onClose: () => {
+          console.log('[Professor] WebSocket desconectado');
+          cleanupAll();
+          setStatus((prev) => (prev === 'live' ? 'idle' : prev));
+        },
+      });
+
+      await ws.connect();
+      wsRef.current = ws;
+      console.log('[Professor] WebSocket conectado, enviando professor_start...');
+
+      ws.send({
+        type: 'professor_start',
+        token: authSession?.access_token,
+        professorId: user?.id,
+        professorName,
+        subject,
+        language: 'pt',
+      });
+    } catch (err) {
+      console.error('[Professor] Erro ao iniciar sessão:', err);
+      setStatus('idle');
+      cleanupAll();
+    } finally {
+      startingRef.current = false;
+    }
   };
 
   const stopSession = () => {
-    stopCapture();
     if (sessionId) {
       wsRef.current?.send({ type: 'professor_stop', sessionId });
     }
+    cleanupAll();
     wsRef.current?.disconnect();
     wsRef.current = null;
     setStatus('idle');
     setSessionId(null);
   };
+
+  useEffect(() => {
+    return () => {
+      cleanupAll();
+      wsRef.current?.disconnect();
+      wsRef.current = null;
+    };
+  }, []);
 
   return (
     <main className="relative min-h-screen flex flex-col items-center px-6 py-8">

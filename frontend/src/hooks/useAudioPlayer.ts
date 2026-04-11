@@ -16,15 +16,20 @@ export function useAudioPlayer() {
     if (!audio || unlockedRef.current) return;
 
     try {
-      const silentStream = new MediaStream();
       audio.muted = true;
-      audio.srcObject = silentStream;
-      await audio.play();
+      audio.srcObject = new MediaStream();
+      // Race play() against a timeout to avoid hanging on empty streams
+      await Promise.race([
+        audio.play().catch(() => {}),
+        new Promise((r) => setTimeout(r, 500)),
+      ]);
       audio.pause();
       audio.srcObject = null;
       audio.muted = false;
       unlockedRef.current = true;
-    } catch (_) {}
+    } catch (_) {
+      // Swallow errors — audio unlock is best-effort
+    }
   }, []);
 
   const attachStream = useCallback(async (stream: MediaStream | null) => {
