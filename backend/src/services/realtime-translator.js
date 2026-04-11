@@ -2,6 +2,7 @@ import { WebSocket } from 'ws';
 
 const INWORLD_API_KEY = process.env.INWORLD_API_KEY;
 const INWORLD_REALTIME_URL = 'wss://api.inworld.ai/api/v1/realtime/session';
+const INWORLD_WEBRTC_API_BASE_URL = 'https://api.inworld.ai';
 
 const DEFAULT_TARGET_LANG = 'en';
 
@@ -229,6 +230,185 @@ export function createRealtimeTranslator(options = {}) {
 
     get isClosed() {
       return isClosed;
+    },
+  };
+}
+
+function buildRealtimeSessionConfig({ instructions, voice, speed }) {
+  return {
+    type: 'realtime',
+    instructions,
+    output_modalities: ['text', 'audio'],
+    audio: {
+      input: {
+        transcription: {
+          model: 'assemblyai/universal-streaming-multilingual',
+        },
+        turn_detection: {
+          type: 'semantic_vad',
+          eagerness: 'medium',
+          create_response: true,
+          interrupt_response: true,
+        },
+      },
+      output: {
+        voice,
+        speed,
+      },
+    },
+  };
+}
+
+async function requestInworldWebRTC(path, { method = 'GET', body } = {}) {
+  if (!INWORLD_API_KEY) {
+    throw new Error('INWORLD_API_KEY nao definida');
+  }
+
+  const response = await fetch(`${INWORLD_WEBRTC_API_BASE_URL}${path}`, {
+    method,
+    headers: {
+      Authorization: `Bearer ${INWORLD_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+
+  const responseText = await response.text();
+  let payload = null;
+  try {
+    payload = responseText ? JSON.parse(responseText) : null;
+  } catch (_) {
+    payload = responseText || null;
+  }
+
+  if (!response.ok) {
+    const details = payload?.error?.message || payload?.message || responseText || response.statusText;
+    throw new Error(`Inworld WebRTC ${method} ${path} falhou (${response.status}): ${details}`);
+  }
+
+  return payload;
+}
+
+export function createRealtimeTranslatorWebRTC(options = {}) {
+  const {
+    initialTargetLang = DEFAULT_TARGET_LANG,
+    voice = 'Dennis',
+    speed = 1.0,
+    instructions: customInstructions,
+    onDebug,
+    onError,
+    onRemoteAudioTrack,
+  } = options;
+
+  const state = {
+    currentTargetLang: initialTargetLang,
+    callId: null,
+    answerSdp: null,
+    isClosed: false,
+  };
+
+  const debug = (message) => onDebug?.(`[InworldWebRTC] ${message}`);
+
+  return {
+    async getIceServers() {
+      try {
+        const data = await requestInworldWebRTC('/v1/realtime/ice-servers');
+        return data?.ice_servers || [];
+      } catch (err) {
+        onError?.(err);
+        throw err;
+      }
+    },
+
+    async createOffer({ sdp, targetLang, instructions, session, voice: nextVoice, speed: nextSpeed } = {}) {
+      if (state.isClosed) throw new Error('Translator WebRTC fechado');
+      if (!sdp) throw new Error('SDP offer obrigatoria');
+
+      const nextTarget = targetLang || state.currentTargetLang;
+      state.currentTargetLang = nextTarget;
+
+      const nextInstructions =
+        instructions ||
+        customInstructions ||
+        buildTranslatorInstructions(nextTarget);
+
+      const payload = await requestInworldWebRTC('/v1/realtime/calls', {
+        method: 'POST',
+        body: {
+          sdp,
+          session: session || buildRealtimeSessionConfig({
+            instructions: nextInstructions,
+            voice: nextVoice || voice,
+            speed: nextSpeed || speed,
+          }),
+        },
+      });
+
+      state.callId = payload?.id || null;
+      state.answerSdp = payload?.sdp || null;
+
+      debug(`call criada id=${state.callId || 'n/a'} target=${nextTarget}`);
+
+      return {
+        callId: state.callId,
+        sdp: state.answerSdp,
+        iceServers: payload?.ice_servers || [],
+      };
+    },
+
+    setAnswer(sdp) {
+      if (state.isClosed) throw new Error('Translator WebRTC fechado');
+      if (!sdp) throw new Error('SDP answer obrigatoria');
+      state.answerSdp = sdp;
+      debug('SDP answer atualizada manualmente');
+      return { ok: true };
+    },
+
+    async sendEvent(event, opts = {}) {
+      if (state.isClosed) throw new Error('Translator WebRTC fechado');
+      const callId = opts.callId || state.callId;
+      if (!callId) throw new Error('callId nao definido para enviar evento');
+      if (!event || typeof event !== 'object') throw new Error('Evento invalido para data channel');
+
+      try {
+        const payload = await requestInworldWebRTC(`/v1/realtime/calls/${callId}/events`, {
+          method: 'POST',
+          body: event,
+        });
+
+        if (event.type === 'remote_audio.track' && typeof onRemoteAudioTrack === 'function') {
+          onRemoteAudioTrack(payload);
+        }
+
+        return payload;
+      } catch (err) {
+        onError?.(err);
+        throw err;
+      }
+    },
+
+    updateTargetLanguage(nextTargetLang) {
+      if (!nextTargetLang || nextTargetLang === state.currentTargetLang) return;
+      state.currentTargetLang = nextTargetLang;
+      debug(`target atualizado para ${nextTargetLang}`);
+    },
+
+    close() {
+      state.isClosed = true;
+      state.callId = null;
+      state.answerSdp = null;
+    },
+
+    get callId() {
+      return state.callId;
+    },
+
+    get targetLanguage() {
+      return state.currentTargetLang;
+    },
+
+    get isClosed() {
+      return state.isClosed;
     },
   };
 }

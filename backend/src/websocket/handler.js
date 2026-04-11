@@ -6,6 +6,19 @@ const activeSessions = new Map();
 global.activeSessions = activeSessions;
 const lingeringSessions = new Map();
 
+function isFatalInworldError(message = "") {
+  const normalized = String(message).toLowerCase();
+  return (
+    normalized.includes("401") ||
+    normalized.includes("402") ||
+    normalized.includes("403") ||
+    normalized.includes("auth") ||
+    normalized.includes("quota") ||
+    normalized.includes("payment") ||
+    normalized.includes("billing")
+  );
+}
+
 export function setupWebSocket(server) {
   const wss = new WebSocketServer({ server, path: "/ws" });
   wss.on("connection", (ws, req) => {
@@ -76,9 +89,12 @@ function openRealtimeStream(sessionId) {
       onDebug: (msg) => console.log(msg),
       onError: (err) => {
         console.error(`[Session ${sessionId}] Inworld error:`, err.message);
+        const stream = session.rtStream;
         session.rtStream = null;
-        if (err.message && err.message.toLowerCase().includes("auth")) {
+        if (isFatalInworldError(err.message)) {
+          try { stream?.close?.(); } catch (_) {}
           session.rtBlocked = true;
+          console.warn(`[Session ${sessionId}] Realtime bloqueado por erro fatal: ${err.message}`);
           return;
         }
         setTimeout(() => {

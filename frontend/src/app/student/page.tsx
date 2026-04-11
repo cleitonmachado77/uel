@@ -1,10 +1,9 @@
 'use client';
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { WSClient, WSMessage } from '@/lib/websocket';
-import { useAudioPlayer } from '@/hooks/useAudioPlayer';
+import { usePcmPlayer } from '@/hooks/usePcmPlayer';
 import { useLocale } from '@/contexts/LocaleContext';
-import { useAuth } from '@/contexts/AuthContext';
 import { supabase } from '@/lib/supabase';
+import { WSClient } from '@/lib/websocket';
 
 type Session = {
   id: string;
@@ -27,22 +26,19 @@ const TARGET_LANGUAGES = [
   { code: 'zh', label: '中文', flag: '🇨🇳' },
 ];
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
-
 export default function StudentPage() {
   const { t } = useLocale();
-  const { user, session: authSession } = useAuth();
   const [sessions, setSessions] = useState<Session[]>([]);
   const [connected, setConnected] = useState(false);
   const [currentSession, setCurrentSession] = useState<Session | null>(null);
   const [targetLang, setTargetLang] = useState('en');
+  const [connectError, setConnectError] = useState<string | null>(null);
   const targetLangRef = useRef(targetLang);
   const [loading, setLoading] = useState(true);
-  const wsRef = useRef<WSClient | null>(null);
   const joiningRef = useRef(false);
-  const { isPlaying, enqueue, stop: stopPlayer, init: initPlayer } = useAudioPlayer();
+  const wsRef = useRef<WSClient | null>(null);
+  const { isPlaying, init: initPlayer, feedPcm, stop: stopPlayer } = usePcmPlayer();
 
-  // Busca sessões ativas
   const fetchSessions = async () => {
     try {
       const { data, error } = await supabase
@@ -81,7 +77,7 @@ export default function StudentPage() {
   useEffect(() => {
     fetchSessions();
     const interval = setInterval(() => {
-      if (!connected) fetchSessions(); // Não faz polling enquanto conectado
+      if (!connected) fetchSessions();
     }, 3000);
 
     const channel = supabase
@@ -99,70 +95,67 @@ export default function StudentPage() {
     };
   }, []);
 
+  const leaveSession = useCallback(() => {
+    joiningRef.current = false;
+    stopPlayer();
+    wsRef.current?.disconnect();
+    wsRef.current = null;
+    setConnected(false);
+    setCurrentSession(null);
+    setConnectError(null);
+  }, [stopPlayer]);
+
   const joinSession = async (session: Session) => {
-    if (joiningRef.current) return;
+    if (joiningRef.current || connected) return;
     joiningRef.current = true;
 
-    setConnected(true);
-    setCurrentSession(session);
-    // Dispara unlock de áudio dentro do gesto (não bloqueia com await)
-    initPlayer().catch(() => {});
+    try {
+      setConnectError(null);
+      setCurrentSession(session);
 
-    const connectWs = async () => {
+      await initPlayer();
+
       const ws = new WSClient({
-        onMessage: (msg: WSMessage) => {
-          if (msg.type === 'joined') {
-            console.log('[Student] Joined session:', msg.professorName, msg.subject);
-            ws.send({ type: 'student_set_language', language: targetLangRef.current });
-          }
-          if (msg.type === 'error') {
-            console.error('[Student] Server error:', msg.message);
-          }
+        onMessage: (msg) => {
           if (msg.type === 'session_ended') {
             leaveSession();
           }
         },
-        onAudio: (data: ArrayBuffer, meta?: Record<string, unknown>) => {
-          enqueue(data, meta);
+        onAudio: (audioData) => {
+          feedPcm(audioData);
         },
         onClose: () => {
-          setTimeout(() => {
-            if (wsRef.current) connectWs();
-          }, 2000);
+          wsRef.current = null;
+          leaveSession();
+        },
+        onError: () => {
+          setConnectError('Erro na conexão WebSocket');
         },
       });
 
-      try {
-        await ws.connect();
-        wsRef.current = ws;
-        ws.send({
-          type: 'student_join',
-          sessionId: session.id,
-          language: targetLangRef.current,
-          token: authSession?.access_token || null,
-          studentId: user?.id || null,
-        });
-      } catch (err) {
-        console.error('[Student] Connect failed:', err);
-        setTimeout(() => {
-          if (wsRef.current) connectWs();
-        }, 3000);
-      }
-    };
-
-    // Marca wsRef como ativo para permitir reconexão
-    wsRef.current = {} as any;
-    try {
-      await connectWs();
+      await ws.connect();
+      ws.send({
+        type: 'student_join',
+        sessionId: session.id,
+        language: targetLangRef.current,
+      });
+      wsRef.current = ws;
+      setConnected(true);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Falha ao conectar';
+      setConnectError(message);
+      setCurrentSession(null);
+      wsRef.current?.disconnect();
+      wsRef.current = null;
     } finally {
       joiningRef.current = false;
     }
   };
 
-  // Re-desbloqueia áudio ao interagir com a tela (iOS/iPadOS suspende AudioContext ao perder foco)
+  // Resume AudioContext ao interagir (iOS/iPadOS suspende em background)
   useEffect(() => {
     if (!connected) return;
-    const handleInteraction = () => { initPlayer(); };
+    const handleInteraction = () => { initPlayer().catch(() => {}); };
     document.addEventListener('touchstart', handleInteraction, { passive: true });
     document.addEventListener('click', handleInteraction);
     return () => {
@@ -171,22 +164,19 @@ export default function StudentPage() {
     };
   }, [connected, initPlayer]);
 
-  const leaveSession = () => {
-    const ws = wsRef.current;
-    wsRef.current = null; // Para a reconexão automática
-    joiningRef.current = false;
-    stopPlayer();
-    ws?.disconnect();
-    setConnected(false);
-    setCurrentSession(null);
-  };
-
   const changeLanguage = (lang: string) => {
     setTargetLang(lang);
     targetLangRef.current = lang;
-    stopPlayer(); // Limpa fila de áudio do idioma anterior
     wsRef.current?.send({ type: 'student_set_language', language: lang });
   };
+
+  // Cleanup no unmount
+  useEffect(() => {
+    return () => {
+      wsRef.current?.disconnect();
+      wsRef.current = null;
+    };
+  }, []);
 
   return (
     <main className="relative min-h-screen flex flex-col px-6 py-8 pb-32">
@@ -203,6 +193,12 @@ export default function StudentPage() {
       <div className="w-full max-w-md mx-auto bg-black/40 backdrop-blur-md rounded-3xl p-6 border border-white/10">
         <h1 className="text-2xl font-bold text-primary mb-1">{t('student.title')}</h1>
         <p className="text-gray-400 text-sm mb-6">{t('student.subtitle')}</p>
+
+        {connectError && (
+          <div className="mb-4 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-300">
+            {connectError}
+          </div>
+        )}
 
         {/* Seletor de idioma */}
         <div className="mb-6">
@@ -269,7 +265,6 @@ export default function StudentPage() {
       {connected && currentSession && (
         <div className="fixed bottom-0 left-0 right-0 bg-black/60 backdrop-blur-md border-t border-white/10 px-6 py-4">
           <div className="max-w-md mx-auto flex items-center gap-4">
-            {/* Info */}
             <div className="flex-1 min-w-0">
               <p className="text-white font-semibold text-sm truncate">
                 {currentSession.professorName}
@@ -277,7 +272,6 @@ export default function StudentPage() {
               <p className="text-gray-400 text-xs truncate">{currentSession.subject}</p>
             </div>
 
-            {/* Indicador de áudio */}
             <div className="flex items-end gap-0.5 h-4">
               {isPlaying ? (
                 [...Array(4)].map((_, i) => (
@@ -292,7 +286,6 @@ export default function StudentPage() {
               )}
             </div>
 
-            {/* Botão sair */}
             <button
               onClick={leaveSession}
               className="bg-red-600/20 text-red-400 hover:bg-red-600/30 px-4 py-2 rounded-full text-sm transition-colors"

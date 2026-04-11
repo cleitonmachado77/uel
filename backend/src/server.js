@@ -2,9 +2,11 @@ import 'dotenv/config';
 import express from 'express';
 import { createServer } from 'http';
 import { setupWebSocket } from './websocket/handler.js';
+import { createRealtimeTranslatorWebRTC } from './services/realtime-translator.js';
 
 const app = express();
 const server = createServer(app);
+const realtimeWebRTC = createRealtimeTranslatorWebRTC();
 
 app.use(express.json());
 
@@ -19,6 +21,68 @@ app.use((_req, res, next) => {
 
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok' });
+});
+
+app.get('/api/realtime/ice-servers', async (_req, res) => {
+  try {
+    const iceServers = await realtimeWebRTC.getIceServers();
+    res.json({ ice_servers: iceServers });
+  } catch (err) {
+    console.error('Erro ao buscar ICE servers:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/realtime/calls', async (req, res) => {
+  const { sdp, targetLang, voice, speed, instructions, session } = req.body || {};
+  try {
+    if (!sdp || typeof sdp !== 'string') {
+      return res.status(400).json({ error: 'Campo sdp obrigatorio' });
+    }
+
+    const call = await realtimeWebRTC.createOffer({
+      sdp,
+      targetLang,
+      voice,
+      speed,
+      instructions,
+      session,
+    });
+
+    return res.json({
+      id: call.callId,
+      sdp: call.sdp,
+      ice_servers: call.iceServers || [],
+    });
+  } catch (err) {
+    console.error('Erro ao criar call WebRTC:', err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/realtime/calls/:callId/answer', (req, res) => {
+  const { sdp } = req.body || {};
+  try {
+    if (!sdp || typeof sdp !== 'string') {
+      return res.status(400).json({ error: 'Campo sdp obrigatorio' });
+    }
+    realtimeWebRTC.setAnswer(sdp);
+    return res.json({ ok: true, callId: req.params.callId });
+  } catch (err) {
+    console.error('Erro ao salvar SDP answer:', err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/realtime/calls/:callId/events', async (req, res) => {
+  const event = req.body;
+  try {
+    const payload = await realtimeWebRTC.sendEvent(event, { callId: req.params.callId });
+    return res.json({ ok: true, payload });
+  } catch (err) {
+    console.error('Erro ao encaminhar evento WebRTC:', err.message);
+    return res.status(500).json({ error: err.message });
+  }
 });
 
 // API para listar sessões ativas (busca do Supabase)
