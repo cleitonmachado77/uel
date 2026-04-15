@@ -6,22 +6,14 @@ import { useLocale } from '@/contexts/LocaleContext';
 import { supabase } from '@/lib/supabase';
 import { LOCALES } from '@/lib/i18n';
 
-/** Lista todos os dispositivos de entrada de áudio disponíveis. */
-async function listAudioInputDevices(): Promise<MediaDeviceInfo[]> {
-  // Precisamos de uma permissão prévia para obter os labels dos dispositivos
-  try {
-    const tempStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    tempStream.getTracks().forEach((t) => t.stop());
-  } catch (_) {}
-  const devices = await navigator.mediaDevices.enumerateDevices();
-  return devices.filter((d) => d.kind === 'audioinput');
-}
-
 /**
  * Detecta se o browser é Safari/iOS.
- * No iOS, echoCancellation/noiseSuppression/autoGainControl forçam o uso
- * do microfone embutido e ignoram microfones externos (lapela, headset, etc).
- * A solução é desativar essas constraints no iOS para liberar o microfone externo.
+ *
+ * No iOS/Safari, qualquer constraint de processamento de áudio
+ * (echoCancellation, noiseSuppression, autoGainControl) faz o sistema
+ * ignorar microfones externos e usar apenas o microfone embutido.
+ * Além disso, enumerateDevices() no iOS sempre retorna apenas 1 audioinput,
+ * então o seletor de dispositivo não funciona lá.
  */
 function isIOS(): boolean {
   if (typeof navigator === 'undefined') return false;
@@ -30,6 +22,21 @@ function isIOS(): boolean {
     // iPad OS 13+ se identifica como MacIntel mas tem touchpoints
     (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
   );
+}
+
+/**
+ * Lista dispositivos de entrada de áudio SEM abrir popup de permissão.
+ * Usa apenas enumerateDevices() — se a permissão já foi concedida antes,
+ * os labels aparecem; caso contrário, retorna lista vazia (sem pedir permissão).
+ * Nunca chama getUserMedia aqui para evitar o loop de popup no iOS.
+ */
+async function listAudioInputDevices(): Promise<MediaDeviceInfo[]> {
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    return devices.filter((d) => d.kind === 'audioinput');
+  } catch (_) {
+    return [];
+  }
 }
 
 /**
@@ -109,24 +116,15 @@ export default function ProfessorPage() {
       });
   }, [user]);
 
-  // Carrega a lista de microfones disponíveis ao montar o componente
+  // Carrega a lista de microfones disponíveis ao montar o componente.
+  // Não chama getUserMedia aqui — apenas lê o que o browser já conhece.
+  // No iOS isso retorna lista vazia (iOS não expõe múltiplos audioinput),
+  // então o seletor simplesmente não aparece, o que é o comportamento correto.
   useEffect(() => {
     listAudioInputDevices().then((devices) => {
       setAudioDevices(devices);
-      // Pré-seleciona o dispositivo padrão (deviceId vazio = padrão do sistema)
       if (devices.length > 0) setSelectedDeviceId(devices[0].deviceId);
     });
-
-    // Atualiza a lista se o usuário conectar/desconectar um dispositivo
-    const handleDeviceChange = () => {
-      listAudioInputDevices().then((devices) => {
-        setAudioDevices(devices);
-      });
-    };
-    navigator.mediaDevices.addEventListener('devicechange', handleDeviceChange);
-    return () => {
-      navigator.mediaDevices.removeEventListener('devicechange', handleDeviceChange);
-    };
   }, []);
 
   const cleanupAll = () => {
@@ -146,26 +144,28 @@ export default function ProfessorPage() {
     try {
       console.log('[Professor] Solicitando microfone...');
       const ios = isIOS();
-      const audioConstraints: MediaTrackConstraints = {
-        // No iOS, essas constraints forçam o microfone embutido e bloqueiam
-        // microfones externos (lapela, headset). Desativamos no iOS.
-        echoCancellation: !ios,
-        noiseSuppression: !ios,
-        autoGainControl: !ios,
-        channelCount: 1,
-      };
-      // Usa o dispositivo selecionado pelo professor, se houver
-      // (no iOS o seletor raramente aparece, mas mantemos para outros browsers)
-      if (selectedDeviceId) {
-        audioConstraints.deviceId = { exact: selectedDeviceId };
+
+      // No iOS, qualquer constraint adicional faz o sistema ignorar microfones
+      // externos e usar apenas o embutido. Passamos `audio: true` puro para
+      // que o iOS use o microfone ativo no sistema (externo, se conectado).
+      // Em outros browsers, aplicamos as constraints normalmente.
+      let micStream: MediaStream;
+      if (ios) {
+        micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      } else {
+        const audioConstraints: MediaTrackConstraints = {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          channelCount: 1,
+          ...(selectedDeviceId ? { deviceId: { exact: selectedDeviceId } } : {}),
+        };
+        micStream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
       }
-      console.log('[Professor] iOS detectado:', ios, '| constraints:', audioConstraints);
-      const micStream = await navigator.mediaDevices.getUserMedia({
-        audio: audioConstraints,
-      });
+
       micStreamRef.current = micStream;
       const activeTrack = micStream.getAudioTracks()[0];
-      console.log('[Professor] Microfone obtido:', activeTrack?.label, '| settings:', activeTrack?.getSettings());
+      console.log('[Professor] Microfone obtido:', activeTrack?.label, '| iOS:', ios);
 
       const ws = new WSClient({
         onMessage: (msg) => {
