@@ -8,20 +8,26 @@ import { LOCALES } from '@/lib/i18n';
 
 /**
  * Detecta se o browser é Safari/iOS.
- *
- * No iOS/Safari, qualquer constraint de processamento de áudio
- * (echoCancellation, noiseSuppression, autoGainControl) faz o sistema
- * ignorar microfones externos e usar apenas o microfone embutido.
- * Além disso, enumerateDevices() no iOS sempre retorna apenas 1 audioinput,
- * então o seletor de dispositivo não funciona lá.
  */
 function isIOS(): boolean {
   if (typeof navigator === 'undefined') return false;
   return (
     /iPad|iPhone|iPod/.test(navigator.userAgent) ||
-    // iPad OS 13+ se identifica como MacIntel mas tem touchpoints
     (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
   );
+}
+
+/**
+ * Retorna a versão principal do iOS, ou 0 se não for iOS.
+ * iOS 16+ tem um bug no AVAudioSession onde o input é sempre o microfone
+ * embutido, independente de microfones externos conectados. Isso afeta
+ * qualquer app web via Safari pois o browser usa AVAudioSession internamente.
+ * Não há solução via Web API — é uma limitação do sistema operacional.
+ */
+function getIOSVersion(): number {
+  if (typeof navigator === 'undefined') return 0;
+  const match = navigator.userAgent.match(/OS (\d+)_/);
+  return match ? parseInt(match[1], 10) : 0;
 }
 
 /**
@@ -96,6 +102,7 @@ export default function ProfessorPage() {
   const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
   const [audioDevices, setAudioDevices] = useState<MediaDeviceInfo[]>([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState<string>('');
+  const [iosExternalMicWarning, setIosExternalMicWarning] = useState(false);
   const wsRef = useRef<WSClient | null>(null);
   const micStreamRef = useRef<MediaStream | null>(null);
   const stopRelayRef = useRef<(() => void) | null>(null);
@@ -125,6 +132,13 @@ export default function ProfessorPage() {
       setAudioDevices(devices);
       if (devices.length > 0) setSelectedDeviceId(devices[0].deviceId);
     });
+
+    // iOS 16+ tem um bug no AVAudioSession que faz o input ser sempre o
+    // microfone embutido, mesmo com microfone externo conectado.
+    // Isso afeta qualquer app web via Safari — não há solução via Web API.
+    if (isIOS() && getIOSVersion() >= 16) {
+      setIosExternalMicWarning(true);
+    }
   }, []);
 
   const cleanupAll = () => {
@@ -269,6 +283,18 @@ export default function ProfessorPage() {
               </p>
             </div>
           </div>
+
+          {iosExternalMicWarning && (
+            <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-xl px-4 py-3 text-yellow-300 text-xs space-y-1">
+              <p className="font-semibold">⚠️ Limitação do iOS 16+</p>
+              <p>
+                O Safari no iOS 16 e versões mais recentes não permite que apps web acessem microfones externos (lapela, headset). O sistema sempre usa o microfone embutido do dispositivo, independente do que estiver conectado.
+              </p>
+              <p className="text-yellow-400/70">
+                Para usar o microfone de lapela, grave o áudio com o app de Câmera ou Voice Memos do iPhone e compartilhe depois.
+              </p>
+            </div>
+          )}
 
           {audioDevices.length > 1 && (
             <div className="space-y-1">
