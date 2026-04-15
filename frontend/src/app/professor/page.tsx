@@ -6,6 +6,8 @@ import { useLocale } from '@/contexts/LocaleContext';
 import { supabase } from '@/lib/supabase';
 import { LOCALES } from '@/lib/i18n';
 
+const TARGET_SAMPLE_RATE = 24000;
+
 /**
  * Detecta se o browser é Safari/iOS.
  */
@@ -18,23 +20,7 @@ function isIOS(): boolean {
 }
 
 /**
- * Retorna a versão principal do iOS, ou 0 se não for iOS.
- * iOS 16+ tem um bug no AVAudioSession onde o input é sempre o microfone
- * embutido, independente de microfones externos conectados. Isso afeta
- * qualquer app web via Safari pois o browser usa AVAudioSession internamente.
- * Não há solução via Web API — é uma limitação do sistema operacional.
- */
-function getIOSVersion(): number {
-  if (typeof navigator === 'undefined') return 0;
-  const match = navigator.userAgent.match(/OS (\d+)_/);
-  return match ? parseInt(match[1], 10) : 0;
-}
-
-/**
  * Lista dispositivos de entrada de áudio SEM abrir popup de permissão.
- * Usa apenas enumerateDevices() — se a permissão já foi concedida antes,
- * os labels aparecem; caso contrário, retorna lista vazia (sem pedir permissão).
- * Nunca chama getUserMedia aqui para evitar o loop de popup no iOS.
  */
 async function listAudioInputDevices(): Promise<MediaDeviceInfo[]> {
   try {
@@ -46,33 +32,72 @@ async function listAudioInputDevices(): Promise<MediaDeviceInfo[]> {
 }
 
 /**
- * Captures PCM16LE from a MediaStream and calls onChunk with base64 data.
- * Returns a cleanup function that stops the capture.
+ * Downsampling linear simples de sourceSampleRate → TARGET_SAMPLE_RATE.
+ * Usado quando o AudioContext nativo opera em 44100/48000 Hz (iOS com mic externo).
+ */
+function downsample(input: Float32Array, sourceSampleRate: number): Float32Array {
+  if (sourceSampleRate === TARGET_SAMPLE_RATE) return input;
+  const ratio = sourceSampleRate / TARGET_SAMPLE_RATE;
+  const outputLength = Math.floor(input.length / ratio);
+  const output = new Float32Array(outputLength);
+  for (let i = 0; i < outputLength; i++) {
+    output[i] = input[Math.floor(i * ratio)];
+  }
+  return output;
+}
+
+/**
+ * Converte Float32Array para PCM16LE base64.
+ */
+function float32ToPcm16Base64(samples: Float32Array): string {
+  const pcmBuffer = new ArrayBuffer(samples.length * 2);
+  const view = new DataView(pcmBuffer);
+  for (let i = 0; i < samples.length; i++) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    view.setInt16(i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+  }
+  const bytes = new Uint8Array(pcmBuffer);
+  let raw = '';
+  const chunkSize = 8192;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    raw += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(raw);
+}
+
+/**
+ * Captura PCM16LE de um MediaStream e chama onChunk com dados base64.
+ *
+ * IMPORTANTE — iOS com microfone externo:
+ * O iOS Safari NÃO aceita AudioContext com sampleRate customizado quando
+ * um microfone externo está conectado. O hardware externo pode operar em
+ * 44100 ou 48000 Hz, e forçar 24000 Hz faz o contexto falhar silenciosamente
+ * ou capturar do microfone embutido.
+ *
+ * Solução: criar o AudioContext SEM especificar sampleRate (usa o nativo do
+ * hardware), capturar no rate nativo, e fazer downsampling manual para 24000 Hz.
  */
 function startPcmRelay(
   stream: MediaStream,
   onChunk: (b64: string) => void,
 ): () => void {
   const ACtx = window.AudioContext || (window as any).webkitAudioContext;
-  const audioCtx = new ACtx({ sampleRate: 24000 });
+
+  // Sem sampleRate fixo — o browser/iOS usa o rate nativo do dispositivo de áudio
+  const audioCtx = new ACtx();
+  const nativeSampleRate = audioCtx.sampleRate;
+  console.log('[Professor] AudioContext sampleRate nativo:', nativeSampleRate);
+
   const source = audioCtx.createMediaStreamSource(stream);
-  const processor = audioCtx.createScriptProcessor(2048, 1, 1);
+  const processor = audioCtx.createScriptProcessor(4096, 1, 1);
 
   processor.onaudioprocess = (event) => {
     const input = event.inputBuffer.getChannelData(0);
-    const pcmBuffer = new ArrayBuffer(input.length * 2);
-    const view = new DataView(pcmBuffer);
-    for (let i = 0; i < input.length; i++) {
-      const sample = Math.max(-1, Math.min(1, input[i]));
-      view.setInt16(i * 2, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
-    }
-    const bytes = new Uint8Array(pcmBuffer);
-    let raw = '';
-    const chunkSize = 8192;
-    for (let i = 0; i < bytes.length; i += chunkSize) {
-      raw += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
-    }
-    onChunk(btoa(raw));
+
+    // Faz downsampling se necessário (ex: 44100 → 24000, 48000 → 24000)
+    const resampled = downsample(input, nativeSampleRate);
+    const b64 = float32ToPcm16Base64(resampled);
+    onChunk(b64);
   };
 
   const mute = audioCtx.createGain();
@@ -102,7 +127,6 @@ export default function ProfessorPage() {
   const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
   const [audioDevices, setAudioDevices] = useState<MediaDeviceInfo[]>([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState<string>('');
-  const [iosExternalMicWarning, setIosExternalMicWarning] = useState(false);
   const wsRef = useRef<WSClient | null>(null);
   const micStreamRef = useRef<MediaStream | null>(null);
   const stopRelayRef = useRef<(() => void) | null>(null);
@@ -124,21 +148,12 @@ export default function ProfessorPage() {
   }, [user]);
 
   // Carrega a lista de microfones disponíveis ao montar o componente.
-  // Não chama getUserMedia aqui — apenas lê o que o browser já conhece.
-  // No iOS isso retorna lista vazia (iOS não expõe múltiplos audioinput),
-  // então o seletor simplesmente não aparece, o que é o comportamento correto.
+  // Não chama getUserMedia aqui para evitar popup de permissão no iOS.
   useEffect(() => {
     listAudioInputDevices().then((devices) => {
       setAudioDevices(devices);
       if (devices.length > 0) setSelectedDeviceId(devices[0].deviceId);
     });
-
-    // iOS 16+ tem um bug no AVAudioSession que faz o input ser sempre o
-    // microfone embutido, mesmo com microfone externo conectado.
-    // Isso afeta qualquer app web via Safari — não há solução via Web API.
-    if (isIOS() && getIOSVersion() >= 16) {
-      setIosExternalMicWarning(true);
-    }
   }, []);
 
   const cleanupAll = () => {
@@ -156,13 +171,12 @@ export default function ProfessorPage() {
     setStatus('connecting');
 
     try {
-      console.log('[Professor] Solicitando microfone...');
       const ios = isIOS();
+      console.log('[Professor] Solicitando microfone... iOS:', ios);
 
-      // No iOS, qualquer constraint adicional faz o sistema ignorar microfones
-      // externos e usar apenas o embutido. Passamos `audio: true` puro para
-      // que o iOS use o microfone ativo no sistema (externo, se conectado).
-      // Em outros browsers, aplicamos as constraints normalmente.
+      // No iOS: audio:true puro — qualquer constraint adicional faz o iOS
+      // ignorar microfones externos e usar apenas o embutido.
+      // Em outros browsers: aplicamos constraints de qualidade normalmente.
       let micStream: MediaStream;
       if (ios) {
         micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -179,7 +193,8 @@ export default function ProfessorPage() {
 
       micStreamRef.current = micStream;
       const activeTrack = micStream.getAudioTracks()[0];
-      console.log('[Professor] Microfone obtido:', activeTrack?.label, '| iOS:', ios);
+      const settings = activeTrack?.getSettings();
+      console.log('[Professor] Microfone obtido:', activeTrack?.label, '| sampleRate:', settings?.sampleRate);
 
       const ws = new WSClient({
         onMessage: (msg) => {
@@ -283,18 +298,6 @@ export default function ProfessorPage() {
               </p>
             </div>
           </div>
-
-          {iosExternalMicWarning && (
-            <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-xl px-4 py-3 text-yellow-300 text-xs space-y-1">
-              <p className="font-semibold">⚠️ Limitação do iOS 16+</p>
-              <p>
-                O Safari no iOS 16 e versões mais recentes não permite que apps web acessem microfones externos (lapela, headset). O sistema sempre usa o microfone embutido do dispositivo, independente do que estiver conectado.
-              </p>
-              <p className="text-yellow-400/70">
-                Para usar o microfone de lapela, grave o áudio com o app de Câmera ou Voice Memos do iPhone e compartilhe depois.
-              </p>
-            </div>
-          )}
 
           {audioDevices.length > 1 && (
             <div className="space-y-1">
