@@ -6,6 +6,17 @@ import { useLocale } from '@/contexts/LocaleContext';
 import { supabase } from '@/lib/supabase';
 import { LOCALES } from '@/lib/i18n';
 
+/** Lista todos os dispositivos de entrada de áudio disponíveis. */
+async function listAudioInputDevices(): Promise<MediaDeviceInfo[]> {
+  // Precisamos de uma permissão prévia para obter os labels dos dispositivos
+  try {
+    const tempStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    tempStream.getTracks().forEach((t) => t.stop());
+  } catch (_) {}
+  const devices = await navigator.mediaDevices.enumerateDevices();
+  return devices.filter((d) => d.kind === 'audioinput');
+}
+
 /**
  * Captures PCM16LE from a MediaStream and calls onChunk with base64 data.
  * Returns a cleanup function that stops the capture.
@@ -61,6 +72,8 @@ export default function ProfessorPage() {
   const [subject, setSubject] = useState('');
   const [professorName, setProfessorName] = useState('');
   const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
+  const [audioDevices, setAudioDevices] = useState<MediaDeviceInfo[]>([]);
+  const [selectedDeviceId, setSelectedDeviceId] = useState<string>('');
   const wsRef = useRef<WSClient | null>(null);
   const micStreamRef = useRef<MediaStream | null>(null);
   const stopRelayRef = useRef<(() => void) | null>(null);
@@ -81,6 +94,26 @@ export default function ProfessorPage() {
       });
   }, [user]);
 
+  // Carrega a lista de microfones disponíveis ao montar o componente
+  useEffect(() => {
+    listAudioInputDevices().then((devices) => {
+      setAudioDevices(devices);
+      // Pré-seleciona o dispositivo padrão (deviceId vazio = padrão do sistema)
+      if (devices.length > 0) setSelectedDeviceId(devices[0].deviceId);
+    });
+
+    // Atualiza a lista se o usuário conectar/desconectar um dispositivo
+    const handleDeviceChange = () => {
+      listAudioInputDevices().then((devices) => {
+        setAudioDevices(devices);
+      });
+    };
+    navigator.mediaDevices.addEventListener('devicechange', handleDeviceChange);
+    return () => {
+      navigator.mediaDevices.removeEventListener('devicechange', handleDeviceChange);
+    };
+  }, []);
+
   const cleanupAll = () => {
     stopRelayRef.current?.();
     stopRelayRef.current = null;
@@ -97,16 +130,22 @@ export default function ProfessorPage() {
 
     try {
       console.log('[Professor] Solicitando microfone...');
+      const audioConstraints: MediaTrackConstraints = {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+        channelCount: 1,
+      };
+      // Usa o dispositivo selecionado pelo professor, se houver
+      if (selectedDeviceId) {
+        audioConstraints.deviceId = { exact: selectedDeviceId };
+      }
       const micStream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-          channelCount: 1,
-        },
+        audio: audioConstraints,
       });
       micStreamRef.current = micStream;
-      console.log('[Professor] Microfone obtido');
+      const activeTrack = micStream.getAudioTracks()[0];
+      console.log('[Professor] Microfone obtido:', activeTrack?.label);
 
       const ws = new WSClient({
         onMessage: (msg) => {
@@ -210,6 +249,23 @@ export default function ProfessorPage() {
               </p>
             </div>
           </div>
+
+          {audioDevices.length > 1 && (
+            <div className="space-y-1">
+              <label className="text-gray-400 text-xs px-1">🎙 Microfone</label>
+              <select
+                value={selectedDeviceId}
+                onChange={(e) => setSelectedDeviceId(e.target.value)}
+                className="w-full bg-white/10 border border-white/10 rounded-xl px-4 py-3 text-white focus:border-primary focus:outline-none appearance-none cursor-pointer"
+              >
+                {audioDevices.map((device) => (
+                  <option key={device.deviceId} value={device.deviceId} className="bg-gray-900 text-white">
+                    {device.label || `Microfone ${audioDevices.indexOf(device) + 1}`}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
 
           <input type="text" placeholder={t('professor.subject')} value={subject} onChange={(e) => setSubject(e.target.value)}
             className="w-full bg-white/10 border border-white/10 rounded-xl px-4 py-3 text-white placeholder-gray-500 focus:border-primary focus:outline-none" />
