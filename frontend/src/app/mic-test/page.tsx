@@ -16,7 +16,6 @@ export default function MicTestPage() {
   const [results, setResults] = useState<DiagResult[]>([]);
   const [running, setRunning] = useState(false);
   const [volumeDb, setVolumeDb] = useState<number | null>(null);
-  const stopRef = useRef<(() => void) | null>(null);
 
   const addResult = (step: string, ok: boolean, detail: string) => {
     setResults((prev) => [...prev, { step, ok, detail }]);
@@ -26,9 +25,7 @@ export default function MicTestPage() {
     setResults([]);
     setVolumeDb(null);
     setRunning(true);
-    stopRef.current?.();
 
-    // 1. Verificar suporte
     if (!navigator.mediaDevices?.getUserMedia) {
       addResult('API getUserMedia', false, 'Não suportado neste browser');
       setRunning(false);
@@ -36,113 +33,75 @@ export default function MicTestPage() {
     }
     addResult('API getUserMedia', true, 'Suportado');
 
-    // 2. Listar dispositivos antes da permissão
-    try {
-      const devsBefore = await navigator.mediaDevices.enumerateDevices();
-      const audioInputsBefore = devsBefore.filter((d) => d.kind === 'audioinput');
+    // PASSO 1: listar dispositivos ANTES de qualquer permissão
+    const listDevices = async (label: string) => {
+      const devs = await navigator.mediaDevices.enumerateDevices();
+      const inputs = devs.filter((d) => d.kind === 'audioinput');
       addResult(
-        'Dispositivos (antes da permissão)',
-        audioInputsBefore.length > 0,
-        `${audioInputsBefore.length} audioinput(s): ${audioInputsBefore.map((d) => d.label || d.deviceId.slice(0, 8) || '(sem label)').join(', ')}`
+        label,
+        inputs.length > 0,
+        `${inputs.length} dispositivo(s): ${inputs.map((d, i) => `[${i}] "${d.label || '(sem label)'}" id:${d.deviceId.slice(0, 8)}`).join(' | ')}`
       );
-    } catch (e: any) {
-      addResult('Dispositivos (antes da permissão)', false, e.message);
-    }
+      return inputs;
+    };
 
-    // 3. Solicitar permissão com audio:true puro
-    let stream: MediaStream | null = null;
+    const inputsBefore = await listDevices('Dispositivos ANTES da permissão');
+
+    // PASSO 2: abrir stream com audio:true para obter permissão
+    let firstStream: MediaStream;
     try {
-      // Tenta capturar o dispositivo externo pelo deviceId (se disponível antes da permissão)
-      const builtInKeywords = /iphone|ipad|ipod|built.?in|interno|embutido/i;
-      const devsBefore2 = await navigator.mediaDevices.enumerateDevices();
-      const inputsBefore = devsBefore2.filter((d) => d.kind === 'audioinput');
-      const external = inputsBefore.find((d) => d.label && !builtInKeywords.test(d.label));
-      if (external) {
-        addResult('Microfone externo detectado', true, `Label: "${external.label}" | deviceId: ${external.deviceId.slice(0, 16)}`);
-      } else {
-        addResult('Microfone externo detectado', false, 'Nenhum dispositivo externo identificado — usando padrão');
-      }
-
-      const audioArg = external
-        ? { deviceId: { exact: external.deviceId } }
-        : true;
-      stream = await navigator.mediaDevices.getUserMedia({ audio: audioArg });
-      const track = stream.getAudioTracks()[0];
-      const settings = track?.getSettings() as any;
-      addResult(
-        `getUserMedia({ audio: ${external ? 'deviceId:exact' : 'true'} })`,
-        true,
-        `Label: "${track?.label || '(vazio)'}" | deviceId: ${settings?.deviceId?.slice(0, 12) || 'N/A'} | sampleRate: ${settings?.sampleRate ?? 'N/A'} | groupId: ${settings?.groupId?.slice(0, 12) || 'N/A'}`
-      );
+      firstStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const t = firstStream.getAudioTracks()[0];
+      const s = t?.getSettings() as any;
+      addResult('getUserMedia(audio:true)', true,
+        `Label: "${t?.label}" | sampleRate: ${s?.sampleRate} | deviceId: ${s?.deviceId?.slice(0,12)}`);
     } catch (e: any) {
-      addResult('getUserMedia', false, e.message);
+      addResult('getUserMedia(audio:true)', false, e.message);
       setRunning(false);
       return;
     }
 
-    // 4. Listar dispositivos depois da permissão
-    try {
-      const devsAfter = await navigator.mediaDevices.enumerateDevices();
-      const audioInputsAfter = devsAfter.filter((d) => d.kind === 'audioinput');
-      addResult(
-        'Dispositivos (após permissão)',
-        audioInputsAfter.length > 0,
-        `${audioInputsAfter.length} audioinput(s): ${audioInputsAfter.map((d) => d.label || d.deviceId.slice(0, 8) || '(sem label)').join(' | ')}`
-      );
-    } catch (e: any) {
-      addResult('Dispositivos (após permissão)', false, e.message);
+    // PASSO 3: listar dispositivos APÓS permissão (iOS pode revelar mais agora)
+    const inputsAfter = await listDevices('Dispositivos APÓS permissão');
+
+    // PASSO 4: parar o stream inicial e tentar capturar cada dispositivo individualmente
+    firstStream!.getTracks().forEach((t) => t.stop());
+
+    const builtInKeywords = /iphone|ipad|ipod|built.?in|interno|embutido/i;
+    const allInputs = inputsAfter.length > inputsBefore.length ? inputsAfter : inputsBefore;
+    const external = allInputs.find((d) => d.label && !builtInKeywords.test(d.label));
+
+    if (external) {
+      addResult('Dispositivo externo identificado', true,
+        `"${external.label}" | deviceId: ${external.deviceId.slice(0, 16)}`);
+
+      // Tentar capturar especificamente o externo
+      try {
+        const extStream = await navigator.mediaDevices.getUserMedia({
+          audio: { deviceId: { exact: external.deviceId } }
+        });
+        const t = extStream.getAudioTracks()[0];
+        const s = t?.getSettings() as any;
+        addResult('getUserMedia(deviceId externo)', true,
+          `Label: "${t?.label}" | sampleRate: ${s?.sampleRate} | deviceId: ${s?.deviceId?.slice(0,12)}`);
+
+        // Medir volume do externo
+        await measureVolume(extStream, addResult, setVolumeDb, 'Volume microfone externo');
+        extStream.getTracks().forEach((t) => t.stop());
+      } catch (e: any) {
+        addResult('getUserMedia(deviceId externo)', false, e.message);
+      }
+    } else {
+      addResult('Dispositivo externo identificado', false,
+        'Nenhum externo encontrado. Testando volume do padrão...');
+      // Medir volume do padrão mesmo assim
+      try {
+        const defStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        await measureVolume(defStream, addResult, setVolumeDb, 'Volume microfone padrão');
+        defStream.getTracks().forEach((t) => t.stop());
+      } catch (_) {}
     }
 
-    // 5. Criar AudioContext SEM sampleRate fixo e medir volume
-    try {
-      const ACtx = (window as any).AudioContext || (window as any).webkitAudioContext;
-      const ctx = new ACtx();
-      addResult('AudioContext sampleRate nativo', true, `${ctx.sampleRate} Hz`);
-
-      const source = ctx.createMediaStreamSource(stream!);
-      const analyser = ctx.createAnalyser();
-      analyser.fftSize = 256;
-      source.connect(analyser);
-
-      const dataArray = new Uint8Array(analyser.frequencyBinCount);
-      let maxDb = -Infinity;
-      let frames = 0;
-      const maxFrames = 60; // ~1 segundo
-
-      await ctx.resume();
-
-      await new Promise<void>((resolve) => {
-        const measure = () => {
-          analyser.getByteFrequencyData(dataArray);
-          const rms = Math.sqrt(dataArray.reduce((s, v) => s + v * v, 0) / dataArray.length);
-          const db = rms > 0 ? 20 * Math.log10(rms / 255) : -Infinity;
-          if (db > maxDb) maxDb = db;
-          setVolumeDb(Math.round(db));
-          frames++;
-          if (frames < maxFrames) {
-            requestAnimationFrame(measure);
-          } else {
-            resolve();
-          }
-        };
-        requestAnimationFrame(measure);
-      });
-
-      const hasSignal = maxDb > -60;
-      addResult(
-        'Sinal de áudio (fale algo)',
-        hasSignal,
-        `Pico: ${maxDb === -Infinity ? '-∞' : Math.round(maxDb)} dB ${hasSignal ? '✅ Sinal detectado' : '❌ Silêncio — microfone não está capturando'}`
-      );
-
-      source.disconnect();
-      ctx.close();
-    } catch (e: any) {
-      addResult('AudioContext / análise de volume', false, e.message);
-    }
-
-    // 6. Parar stream
-    stream?.getTracks().forEach((t) => t.stop());
     setRunning(false);
   };
 
@@ -153,22 +112,17 @@ export default function MicTestPage() {
         Conecte o microfone de lapela ANTES de iniciar. Fale durante o teste para verificar o sinal.
       </p>
 
-      <button
-        onClick={runDiag}
-        disabled={running}
-        className="mb-6 px-6 py-3 bg-green-600 hover:bg-green-700 disabled:opacity-50 rounded-xl font-bold text-white"
-      >
+      <button onClick={runDiag} disabled={running}
+        className="mb-6 px-6 py-3 bg-green-600 hover:bg-green-700 disabled:opacity-50 rounded-xl font-bold text-white">
         {running ? '⏳ Testando... (fale algo)' : '▶ Iniciar Diagnóstico'}
       </button>
 
       {volumeDb !== null && running && (
         <div className="mb-4 text-yellow-300 text-lg">
-          Volume atual: <span className="font-bold">{volumeDb} dB</span>
+          Volume: <span className="font-bold">{volumeDb} dB</span>
           <div className="w-full bg-gray-800 rounded-full h-3 mt-1">
-            <div
-              className="bg-green-500 h-3 rounded-full transition-all"
-              style={{ width: `${Math.max(0, Math.min(100, (volumeDb + 80) * 1.25))}%` }}
-            />
+            <div className="bg-green-500 h-3 rounded-full transition-all"
+              style={{ width: `${Math.max(0, Math.min(100, (volumeDb + 80) * 1.25))}%` }} />
           </div>
         </div>
       )}
@@ -184,12 +138,43 @@ export default function MicTestPage() {
           </div>
         ))}
       </div>
-
-      {results.length > 0 && !running && (
-        <p className="mt-6 text-gray-500 text-xs">
-          Copie esses resultados e envie para o suporte técnico.
-        </p>
-      )}
     </main>
   );
+}
+
+async function measureVolume(
+  stream: MediaStream,
+  addResult: (s: string, ok: boolean, d: string) => void,
+  setVolumeDb: (v: number) => void,
+  label: string
+) {
+  const ACtx = (window as any).AudioContext || (window as any).webkitAudioContext;
+  const ctx = new ACtx();
+  await ctx.resume();
+  const source = ctx.createMediaStreamSource(stream);
+  const analyser = ctx.createAnalyser();
+  analyser.fftSize = 256;
+  source.connect(analyser);
+  const dataArray = new Uint8Array(analyser.frequencyBinCount);
+  let maxDb = -Infinity;
+
+  await new Promise<void>((resolve) => {
+    let frames = 0;
+    const measure = () => {
+      analyser.getByteFrequencyData(dataArray);
+      const rms = Math.sqrt(dataArray.reduce((s, v) => s + v * v, 0) / dataArray.length);
+      const db = rms > 0 ? 20 * Math.log10(rms / 255) : -Infinity;
+      if (db > maxDb) maxDb = db;
+      setVolumeDb(Math.round(db));
+      if (++frames < 80) requestAnimationFrame(measure);
+      else resolve();
+    };
+    requestAnimationFrame(measure);
+  });
+
+  source.disconnect();
+  ctx.close();
+  const hasSignal = maxDb > -60;
+  addResult(label, hasSignal,
+    `Pico: ${maxDb === -Infinity ? '-∞' : Math.round(maxDb)} dB — ${hasSignal ? '✅ Sinal real detectado' : '❌ Silêncio — microfone não captura'}`);
 }
