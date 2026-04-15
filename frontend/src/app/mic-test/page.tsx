@@ -52,16 +52,30 @@ export default function MicTestPage() {
     // 3. Solicitar permissão com audio:true puro
     let stream: MediaStream | null = null;
     try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // Tenta capturar o dispositivo externo pelo deviceId (se disponível antes da permissão)
+      const builtInKeywords = /iphone|ipad|ipod|built.?in|interno|embutido/i;
+      const devsBefore2 = await navigator.mediaDevices.enumerateDevices();
+      const inputsBefore = devsBefore2.filter((d) => d.kind === 'audioinput');
+      const external = inputsBefore.find((d) => d.label && !builtInKeywords.test(d.label));
+      if (external) {
+        addResult('Microfone externo detectado', true, `Label: "${external.label}" | deviceId: ${external.deviceId.slice(0, 16)}`);
+      } else {
+        addResult('Microfone externo detectado', false, 'Nenhum dispositivo externo identificado — usando padrão');
+      }
+
+      const audioArg = external
+        ? { deviceId: { exact: external.deviceId } }
+        : true;
+      stream = await navigator.mediaDevices.getUserMedia({ audio: audioArg });
       const track = stream.getAudioTracks()[0];
       const settings = track?.getSettings() as any;
       addResult(
-        'getUserMedia({ audio: true })',
+        `getUserMedia({ audio: ${external ? 'deviceId:exact' : 'true'} })`,
         true,
         `Label: "${track?.label || '(vazio)'}" | deviceId: ${settings?.deviceId?.slice(0, 12) || 'N/A'} | sampleRate: ${settings?.sampleRate ?? 'N/A'} | groupId: ${settings?.groupId?.slice(0, 12) || 'N/A'}`
       );
     } catch (e: any) {
-      addResult('getUserMedia({ audio: true })', false, e.message);
+      addResult('getUserMedia', false, e.message);
       setRunning(false);
       return;
     }

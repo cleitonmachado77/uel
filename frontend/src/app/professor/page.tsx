@@ -32,6 +32,36 @@ async function listAudioInputDevices(): Promise<MediaDeviceInfo[]> {
 }
 
 /**
+ * Retorna o deviceId do melhor microfone disponível.
+ *
+ * No iOS, antes de chamar getUserMedia, o browser já expõe os deviceIds
+ * de todos os dispositivos conectados (incluindo externos). Após getUserMedia
+ * sem deviceId, o iOS esconde os externos da lista.
+ *
+ * Estratégia: enumerar ANTES da captura e preferir dispositivos externos
+ * (qualquer coisa que não seja o microfone embutido do iPhone/iPad).
+ * Se não houver externo, retorna undefined (usa o padrão do sistema).
+ */
+async function pickBestMicDeviceId(): Promise<string | undefined> {
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const inputs = devices.filter((d) => d.kind === 'audioinput');
+    if (inputs.length <= 1) return undefined;
+
+    // Palavras-chave que identificam o microfone embutido
+    const builtInKeywords = /iphone|ipad|ipod|built.?in|interno|embutido/i;
+
+    // Prefere qualquer dispositivo que NÃO seja o embutido
+    const external = inputs.find((d) => d.label && !builtInKeywords.test(d.label));
+    if (external) {
+      console.log('[Professor] Microfone externo detectado:', external.label, external.deviceId);
+      return external.deviceId;
+    }
+  } catch (_) {}
+  return undefined;
+}
+
+/**
  * Downsampling linear simples de sourceSampleRate → TARGET_SAMPLE_RATE.
  * Usado quando o AudioContext nativo opera em 44100/48000 Hz (iOS com mic externo).
  */
@@ -174,12 +204,18 @@ export default function ProfessorPage() {
       const ios = isIOS();
       console.log('[Professor] Solicitando microfone... iOS:', ios);
 
-      // No iOS: audio:true puro — qualquer constraint adicional faz o iOS
-      // ignorar microfones externos e usar apenas o embutido.
-      // Em outros browsers: aplicamos constraints de qualidade normalmente.
+      // No iOS: enumerar dispositivos ANTES de getUserMedia para capturar
+      // o deviceId do microfone externo (lapela, headset). Após getUserMedia
+      // sem deviceId, o iOS esconde os externos da lista.
+      // Em outros browsers: usar constraints de qualidade + deviceId do seletor.
       let micStream: MediaStream;
       if (ios) {
-        micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const externalDeviceId = await pickBestMicDeviceId();
+        const audioConstraints: MediaTrackConstraints = externalDeviceId
+          ? { deviceId: { exact: externalDeviceId } }
+          : {};
+        console.log('[Professor] iOS deviceId escolhido:', externalDeviceId ?? '(padrão do sistema)');
+        micStream = await navigator.mediaDevices.getUserMedia({ audio: Object.keys(audioConstraints).length ? audioConstraints : true });
       } else {
         const audioConstraints: MediaTrackConstraints = {
           echoCancellation: true,
