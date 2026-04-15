@@ -18,6 +18,21 @@ async function listAudioInputDevices(): Promise<MediaDeviceInfo[]> {
 }
 
 /**
+ * Detecta se o browser é Safari/iOS.
+ * No iOS, echoCancellation/noiseSuppression/autoGainControl forçam o uso
+ * do microfone embutido e ignoram microfones externos (lapela, headset, etc).
+ * A solução é desativar essas constraints no iOS para liberar o microfone externo.
+ */
+function isIOS(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  return (
+    /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+    // iPad OS 13+ se identifica como MacIntel mas tem touchpoints
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
+  );
+}
+
+/**
  * Captures PCM16LE from a MediaStream and calls onChunk with base64 data.
  * Returns a cleanup function that stops the capture.
  */
@@ -130,22 +145,27 @@ export default function ProfessorPage() {
 
     try {
       console.log('[Professor] Solicitando microfone...');
+      const ios = isIOS();
       const audioConstraints: MediaTrackConstraints = {
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
+        // No iOS, essas constraints forçam o microfone embutido e bloqueiam
+        // microfones externos (lapela, headset). Desativamos no iOS.
+        echoCancellation: !ios,
+        noiseSuppression: !ios,
+        autoGainControl: !ios,
         channelCount: 1,
       };
       // Usa o dispositivo selecionado pelo professor, se houver
+      // (no iOS o seletor raramente aparece, mas mantemos para outros browsers)
       if (selectedDeviceId) {
         audioConstraints.deviceId = { exact: selectedDeviceId };
       }
+      console.log('[Professor] iOS detectado:', ios, '| constraints:', audioConstraints);
       const micStream = await navigator.mediaDevices.getUserMedia({
         audio: audioConstraints,
       });
       micStreamRef.current = micStream;
       const activeTrack = micStream.getAudioTracks()[0];
-      console.log('[Professor] Microfone obtido:', activeTrack?.label);
+      console.log('[Professor] Microfone obtido:', activeTrack?.label, '| settings:', activeTrack?.getSettings());
 
       const ws = new WSClient({
         onMessage: (msg) => {
